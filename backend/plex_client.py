@@ -2,10 +2,12 @@
 
 import hashlib
 import logging
+import os
 import re
 import threading
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from plexapi.exceptions import NotFound, Unauthorized
 from plexapi.playqueue import PlayQueue
@@ -980,13 +982,36 @@ class PlexClient:
             logger.exception("Failed to update playlist '%s'", playlist_id)
             return {"success": False, "error": str(e)}
 
+    def _public_url(self) -> str | None:
+        """Plex URL as reached from browsers and players (PLEX_PUBLIC_URL), if set.
+
+        PLEX_URL is what MediaSage itself uses, often a Docker-internal host
+        (http://plex:32400) or a LAN IP that a phone away from home, or a
+        browser on another network, can't reach.
+        """
+        return os.environ.get("PLEX_PUBLIC_URL", "").strip().rstrip("/") or None
+
+    def _player_server_address(self) -> dict[str, str]:
+        """protocol/address/port overrides for playMedia, from PLEX_PUBLIC_URL.
+
+        Without them plexapi tells the player to fetch the play queue from
+        PLEX_URL's host, which a remote player may not be able to reach.
+        """
+        public = self._public_url()
+        if not public:
+            return {}
+        url = urlparse(public)
+        port = url.port or (443 if url.scheme == "https" else 32400)
+        return {"protocol": url.scheme, "address": url.hostname, "port": str(port)}
+
     def _build_playlist_url(self, rating_key: int) -> str | None:
         """Build the Plex web app URL for a playlist."""
         machine_id = self.get_machine_identifier()
         if not machine_id:
             return None
+        base = self._public_url() or self.url
         return (
-            f"{self.url}/web/index.html#!/server/{machine_id}"
+            f"{base}/web/index.html#!/server/{machine_id}"
             f"/playlist?key=%2Fplaylists%2F{rating_key}"
         )
 
@@ -1062,7 +1087,7 @@ class PlexClient:
                     startItem=tracks[0],
                     includeRelated=0,
                 )
-                target_client.playMedia(play_queue)
+                target_client.playMedia(play_queue, **self._player_server_address())
             elif mode == "play_next":
                 # Get current play queue from client timeline entries
                 # timelines() returns a list; timeline is a single object/None

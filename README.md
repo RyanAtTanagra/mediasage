@@ -313,6 +313,7 @@ sudo systemctl start mediasage
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PLEX_URL` | Yes | Plex server URL (e.g., `http://192.168.1.100:32400`) |
+| `PLEX_PUBLIC_URL` | No | Plex URL as reached from browsers and players, if different from `PLEX_URL` (e.g. `PLEX_URL=http://plex:32400` inside Docker, `PLEX_PUBLIC_URL=https://plex.example.com`). Used for "Open in Plex" links and for Play Now on devices that can't reach `PLEX_URL` |
 | `PLEX_TOKEN` | Yes | [Plex authentication token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/) |
 | `GEMINI_API_KEY` | One required | Google Gemini API key |
 | `ANTHROPIC_API_KEY` | One required | Anthropic API key |

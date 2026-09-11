@@ -341,6 +341,28 @@ class TestPlexClientPlaylistCreation:
             assert "abc123def456" in result["playlist_url"]
             assert "999" in result["playlist_url"]
 
+    def test_playlist_url_uses_public_url(self, monkeypatch):
+        """PLEX_PUBLIC_URL replaces PLEX_URL in 'Open in Plex' links."""
+        from backend.plex_client import PlexClient
+
+        monkeypatch.setenv("PLEX_PUBLIC_URL", "https://plex.example.com/")
+        mock_playlist = MagicMock()
+        mock_playlist.ratingKey = "999"
+
+        mock_server = MagicMock()
+        mock_server.library.section.return_value = MagicMock()
+        mock_server.fetchItem.return_value = MagicMock()
+        mock_server.createPlaylist.return_value = mock_playlist
+        mock_server.machineIdentifier = "abc123def456"
+
+        with patch("backend.plex_client.PlexServer", return_value=mock_server):
+            client = PlexClient("http://plex:32400", "token", "Music")
+            result = client.create_playlist("Test Playlist", ["1"])
+
+        assert result["playlist_url"].startswith(
+            "https://plex.example.com/web/index.html#!/server/abc123def456"
+        )
+
 
 class TestTrackCache:
     """Tests for track caching functionality."""
@@ -679,6 +701,31 @@ class TestPlexClientPlayQueue:
         assert result["client_name"] == "Plexamp Mobile"
         assert result["client_product"] == "Plexamp"
         assert result["tracks_queued"] == 2
+
+    def test_play_queue_hands_player_public_url(self, monkeypatch):
+        """With PLEX_PUBLIC_URL set, the player is told to fetch from it, not PLEX_URL."""
+        from backend.plex_client import PlexClient
+
+        monkeypatch.setenv("PLEX_PUBLIC_URL", "https://plex.example.com")
+        target_client = self._make_mock_client(machine_id="target1")
+        mock_play_queue = MagicMock()
+
+        mock_server = MagicMock()
+        mock_server.library.section.return_value = MagicMock()
+        mock_server.clients.return_value = [target_client]
+        mock_server.fetchItem.return_value = MagicMock()
+
+        with patch("backend.plex_client.PlexServer", return_value=mock_server):
+            with patch("backend.plex_client.PlayQueue") as MockPlayQueue:
+                MockPlayQueue.create.return_value = mock_play_queue
+
+                plex = PlexClient("http://plex:32400", "token", "Music")
+                result = plex.play_queue(rating_keys=["101"], client_id="target1", mode="replace")
+
+        assert result["success"] is True
+        target_client.playMedia.assert_called_once_with(
+            mock_play_queue, protocol="https", address="plex.example.com", port="443"
+        )
 
     def test_play_queue_play_next_mode(self):
         """Should add tracks to existing queue in reversed order with playNext=True."""
