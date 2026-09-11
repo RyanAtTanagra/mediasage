@@ -451,11 +451,12 @@ def sync_library(
 
         conn = ensure_db_initialized()
 
-        # Clear existing tracks and reset sync state to avoid stale "cache available"
-        # signal if sync fails partway through
+        # Replace the cache in ONE transaction: the delete, the inserts and the
+        # sync_state update are committed together at the end. If the sync fails
+        # or the process is killed partway (e.g. a container restart), SQLite
+        # rolls it back and the previous complete cache is kept. In WAL mode,
+        # readers keep seeing that previous snapshot until the commit.
         conn.execute("DELETE FROM tracks")
-        conn.execute("UPDATE sync_state SET track_count = 0 WHERE id = 1")
-        conn.commit()
 
         # Phase 1: Fetch albums for genre/year mapping
         logger.info("Fetching album metadata from Plex...")
@@ -530,9 +531,6 @@ def sync_library(
 
                 logger.info("Synced %d/%d tracks", synced_count, total)
 
-                # Commit every batch to allow concurrent reads (WAL mode)
-                conn.commit()
-
         # Insert remaining tracks
         if batch_data:
             conn.executemany(
@@ -546,10 +544,7 @@ def sync_library(
             with _sync_lock:
                 _sync_state["current"] = synced_count
 
-        # Final commit
-        conn.commit()
-
-        # Update sync state
+        # Update sync state (same transaction as the track inserts)
         duration_ms = int((time.time() - start_time) * 1000)
         synced_at = datetime.now(timezone.utc).isoformat()
 
@@ -574,6 +569,8 @@ def sync_library(
 
     except Exception as e:
         logger.exception("Sync failed: %s", e)
+        if conn:
+            conn.rollback()  # keep the previous complete cache
         with _sync_lock:
             _sync_state["error"] = str(e)
         return {"success": False, "error": str(e)}

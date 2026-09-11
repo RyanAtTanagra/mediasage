@@ -606,8 +606,8 @@ class TestSyncLibrary:
         assert tracks_after[0]["rating_key"] == "new-1"
         assert not any(t["rating_key"] == "stale-track-999" for t in tracks_after)
 
-    def test_failed_sync_resets_cache_state(self, initialized_db, mock_track, reset_sync_state):
-        """Failed sync resets track_count so has_cached_tracks() returns False."""
+    def test_failed_sync_keeps_previous_cache(self, initialized_db, mock_track, reset_sync_state):
+        """Failed sync rolls back, keeping the previous complete cache."""
         # First, do a successful sync to populate cache
         class SuccessfulClient:
             def get_machine_identifier(self):
@@ -637,6 +637,46 @@ class TestSyncLibrary:
         result = library_cache.sync_library(FailingClient())
         assert result["success"] is False
 
-        # Cache should now report as empty to avoid using stale data
-        assert library_cache.has_cached_tracks() is False
-        assert library_cache.get_sync_state()["track_count"] == 0
+        # The previous complete cache is still there
+        assert library_cache.has_cached_tracks() is True
+        assert library_cache.get_sync_state()["track_count"] == 1
+
+    def test_sync_failing_midway_keeps_previous_cache(
+        self, initialized_db, mock_plex_client, mock_track, reset_sync_state, monkeypatch
+    ):
+        """A sync that fails after some batches were written rolls back entirely."""
+        result = library_cache.sync_library(mock_plex_client)
+        assert result["success"] is True
+        assert library_cache.get_sync_state()["track_count"] == 3
+        library_cache._sync_state["is_syncing"] = False
+
+        # Small batches so several are written before the failure
+        monkeypatch.setattr(library_cache, "SYNC_BATCH_SIZE", 2)
+
+        class BrokenTrack:
+            ratingKey = "bad"
+
+            @property
+            def title(self):
+                raise RuntimeError("Plex returned a malformed track")
+
+        class FailsMidwayClient:
+            def get_machine_identifier(self):
+                return "test-server-123"
+
+            def get_all_albums_metadata(self):
+                return {}
+
+            def get_all_raw_tracks(self):
+                good = [
+                    mock_track(f"new-{i}", f"New {i}", "Artist", "Album", 1000, "100")
+                    for i in range(5)
+                ]
+                return good + [BrokenTrack()]
+
+        result = library_cache.sync_library(FailsMidwayClient())
+        assert result["success"] is False
+
+        keys = {t["rating_key"] for t in library_cache.get_cached_tracks()}
+        assert keys == {"1", "2", "3"}
+        assert library_cache.get_sync_state()["track_count"] == 3
