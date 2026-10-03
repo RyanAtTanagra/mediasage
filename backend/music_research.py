@@ -20,7 +20,7 @@ from backend.models import ResearchData
 logger = logging.getLogger(__name__)
 
 # MusicBrainz requires a User-Agent header
-USER_AGENT = "MediaSage/1.0 (https://github.com/ecwilsonaz/mediasage)"
+USER_AGENT = "MediaSage/1.0 (https://github.com/RyanAtTanagra/mediasage)"
 
 # Rate limiting: 1 request/second to MusicBrainz
 MB_BASE_URL = "https://musicbrainz.org/ws/2"

@@ -1,8 +1,6 @@
 services:
   mediasage:
-    image: ecwilson/mediasage:latest
-    # Alternative registries:
-    # image: ghcr.io/ecwilsonaz/mediasage:latest
+    image: ghcr.io/ryanattanagra/mediasage:latest
     # To build locally instead, comment out 'image' and uncomment 'build':
     # build: .
     container_name: mediasage
