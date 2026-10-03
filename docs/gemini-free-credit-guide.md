@@ -23,12 +23,11 @@ MediaSage auto-detects Gemini when this key is set.
 
 ## Free Tier Limits
 
-| Model | Requests/Min | Requests/Day | Free? |
-|-------|-------------|--------------|-------|
-| **Gemini 2.5 Flash** | ~10–15 | ~100–500 | Yes |
-| Gemini 2.5 Pro | ~5 | ~25–50 | Yes |
+MediaSage uses **Gemini 3.5 Flash-Lite** by default — fast, handles large track lists, and available to new accounts (Google limits the 2.5 models to accounts that used them before).
 
-MediaSage uses **Gemini 3.5 Flash-Lite** by default — fast, handles large track lists, and available to new accounts (Google limits the 2.5 models to accounts that used them before). Free-tier limits change often and vary by account; check yours at [aistudio.google.com/rate-limit](https://aistudio.google.com/rate-limit). Limits reset at midnight PT.
+Free-tier limits are set per model, change often and vary by account; check yours at [aistudio.google.com/rate-limit](https://aistudio.google.com/rate-limit). Limits reset at midnight PT.
+
+Each playlist makes 3 requests: 2 to the analysis model (understand the prompt, write the playlist description) and 1 to the generation model (pick tracks from the filtered list). Album recommendations make a few more. If you set different models for the two roles in Settings, playlists per day are capped by whichever model's daily limit runs out first.
 
 All current Gemini models support a 1M token context window, enough for ~22,000 tracks per request. On the free tier, the tokens-per-minute limit (250K on many accounts, about 5,500 tracks) caps a single request first; use filters to stay under it.
 
@@ -67,7 +66,7 @@ On the paid tier, a typical playlist costs $0.03–0.25 with Gemini 3.5 Flash-Li
 | Get your key | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
 | Cost | Free (no credit card) |
 | Default model | Gemini 3.5 Flash-Lite |
-| Playlists/day (free) | ~100–500 |
+| Playlists/day (free) | Depends on your per-model limits (see above) |
 | Context window | 1M tokens |
 | Data privacy (free) | Prompts may be used by Google |
 | Data privacy (paid) | Prompts not used by Google |
