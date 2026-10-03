@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse
 from starlette.responses import StreamingResponse
 import httpx
 
-from backend.config import get_config, update_config_values, load_user_yaml_config, save_user_config, ConfigSaveError
+from backend.config import get_config, update_config_values, load_user_yaml_config, save_user_config, ConfigSaveError, MODEL_DEFAULTS
 from backend.version import get_version
 from backend.models import (
     AlbumCandidate,
@@ -28,6 +28,9 @@ from backend.models import (
     AnalyzePromptResponse,
     AnalyzeTrackRequest,
     AnalyzeTrackResponse,
+    CloudModel,
+    CloudModelsResponse,
+    CloudProviderModels,
     ConfigResponse,
     DecadeCount,
     FilterPreviewRequest,
@@ -72,6 +75,7 @@ from backend.models import (
 )
 from backend.plex_client import PlexClient as PlexClientInstance, get_plex_client, init_plex_client
 from backend import library_cache
+from backend.model_catalog import CATALOG_BY_ID, MODEL_CATALOG
 from backend.llm_client import (
     TOKENS_PER_ALBUM,
     estimate_cost_for_model,
@@ -165,6 +169,7 @@ def _build_config_response(config, plex_client) -> ConfigResponse:
 
     is_local = config.llm.provider in ("ollama", "custom")
     gen_costs = get_model_cost(generation_model, config.llm)
+    gen_entry = None if is_local else CATALOG_BY_ID.get(generation_model)
     analysis_costs = get_model_cost(analysis_model, config.llm)
 
     return ConfigResponse(
@@ -191,6 +196,12 @@ def _build_config_response(config, plex_client) -> ConfigResponse:
         custom_context_window=config.llm.custom_context_window,
         is_local_provider=is_local,
         provider_from_env=os.environ.get("LLM_PROVIDER") is not None,
+        models_from_env=bool(
+            os.environ.get("LLM_MODEL_ANALYSIS") or os.environ.get("LLM_MODEL_GENERATION")
+        ),
+        long_context_threshold=gen_entry.long_context_threshold if gen_entry else None,
+        long_context_cost_per_million_input=gen_entry.long_input_cost if gen_entry else None,
+        long_context_cost_per_million_output=gen_entry.long_output_cost if gen_entry else None,
     )
 
 
@@ -459,6 +470,32 @@ async def update_configuration(request: UpdateConfigRequest) -> ConfigResponse:
         init_llm_client(config.llm)
 
     return _build_config_response(config, get_plex_client())
+
+
+@app.get("/api/models", response_model=CloudModelsResponse)
+async def list_cloud_models() -> CloudModelsResponse:
+    """List the cloud models offered in Settings, grouped by provider."""
+    providers: dict[str, CloudProviderModels] = {}
+    for provider in ("anthropic", "openai", "gemini"):
+        models = [
+            CloudModel(
+                id=m.id,
+                label=m.label,
+                context_window=m.context,
+                max_tracks=get_max_tracks_for_model(m.id),
+                cost_per_million_input=m.input_cost,
+                cost_per_million_output=m.output_cost,
+                legacy=m.legacy,
+            )
+            for m in MODEL_CATALOG
+            if m.provider == provider
+        ]
+        providers[provider] = CloudProviderModels(
+            models=models,
+            default_analysis=MODEL_DEFAULTS[provider]["analysis"],
+            default_generation=MODEL_DEFAULTS[provider]["generation"],
+        )
+    return CloudModelsResponse(providers=providers)
 
 
 # =============================================================================

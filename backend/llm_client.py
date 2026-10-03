@@ -13,36 +13,11 @@ import httpx
 from json_repair import repair_json
 import openai
 
+from backend.model_catalog import CATALOG_BY_ID
 from backend.models import LLMConfig, OllamaModel, OllamaModelInfo, OllamaModelsResponse, OllamaStatus
 
 logger = logging.getLogger(__name__)
 
-
-# Cost per million tokens (updated Feb 2026)
-MODEL_COSTS = {
-    # Anthropic models (input/output per million tokens)
-    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
-    "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
-    # OpenAI models
-    "gpt-4.1": {"input": 2.00, "output": 8.00},
-    "gpt-4.1-mini": {"input": 0.40, "output": 1.60},
-    # Google Gemini models
-    "gemini-2.5-pro": {"input": 1.25, "output": 5.00},
-    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
-}
-
-# Context limits per model (in tokens) - used to calculate max tracks
-MODEL_CONTEXT_LIMITS = {
-    # Anthropic
-    "claude-sonnet-4-5": 200_000,
-    "claude-haiku-4-5": 200_000,
-    # OpenAI
-    "gpt-4.1": 128_000,
-    "gpt-4.1-mini": 128_000,
-    # Google Gemini
-    "gemini-2.5-pro": 1_000_000,
-    "gemini-2.5-flash": 1_000_000,
-}
 
 # Tokens per track (based on real-world testing, Feb 2026)
 TOKENS_PER_TRACK = 40
@@ -84,7 +59,7 @@ def estimate_cost_for_model(
     Returns:
         Estimated cost in USD (0.0 for local providers)
     """
-    costs = get_model_cost(model, config)
+    costs = get_model_cost(model, config, input_tokens)
     input_cost = (input_tokens / 1_000_000) * costs["input"]
     output_cost = (output_tokens / 1_000_000) * costs["output"]
     return input_cost + output_cost
@@ -122,15 +97,24 @@ class LLMClient:
     ) -> LLMResponse:
         """Make a completion request to Anthropic."""
         logger.info("Calling Anthropic API with %d char prompt", len(prompt))
+        kwargs: dict[str, Any] = {}
+        entry = CATALOG_BY_ID.get(model)
+        if entry and entry.effort:
+            kwargs["output_config"] = {"effort": entry.effort}
         response = self._client.messages.create(
             model=model,
-            max_tokens=8192,
+            max_tokens=16000,  # Includes thinking tokens on models that think
             system=system,
             messages=[{"role": "user", "content": prompt}],
+            **kwargs,
         )
         logger.debug("Anthropic response received")
 
-        content = response.content[0].text
+        if response.stop_reason == "refusal":
+            raise RuntimeError(f"{model} declined this request; try rephrasing or another model")
+
+        # Skip thinking blocks
+        content = "".join(block.text for block in response.content if block.type == "text")
         return LLMResponse(
             content=content,
             input_tokens=response.usage.input_tokens,
@@ -143,13 +127,22 @@ class LLMClient:
     ) -> LLMResponse:
         """Make a completion request to OpenAI or custom OpenAI-compatible endpoint."""
         logger.info("Calling OpenAI-compatible API with %d char prompt", len(prompt))
+        kwargs: dict[str, Any] = {}
+        if self.provider == "openai":
+            # Reasoning models reject max_tokens
+            kwargs["max_completion_tokens"] = 16000
+            entry = CATALOG_BY_ID.get(model)
+            if entry and entry.effort:
+                kwargs["reasoning_effort"] = entry.effort
+        else:
+            kwargs["max_tokens"] = 8192
         response = self._client.chat.completions.create(
             model=model,
-            max_tokens=8192,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
+            **kwargs,
         )
         logger.debug("OpenAI-compatible response received")
 
@@ -527,8 +520,8 @@ def get_model_context_limit(model: str, config: LLMConfig | None = None) -> int:
         Context limit in tokens
     """
     # Check standard model limits first
-    if model in MODEL_CONTEXT_LIMITS:
-        return MODEL_CONTEXT_LIMITS[model]
+    if model in CATALOG_BY_ID:
+        return CATALOG_BY_ID[model].context
 
     # For local providers, use config-based context window
     if config:
@@ -540,12 +533,15 @@ def get_model_context_limit(model: str, config: LLMConfig | None = None) -> int:
     return 128_000  # Default fallback
 
 
-def get_model_cost(model: str, config: LLMConfig | None = None) -> dict[str, float]:
+def get_model_cost(
+    model: str, config: LLMConfig | None = None, input_tokens: int = 0
+) -> dict[str, float]:
     """Get cost per million tokens for a model.
 
     Args:
         model: Model name
         config: Optional LLMConfig to check for local providers
+        input_tokens: Request size, for models with long-context pricing
 
     Returns:
         Dict with "input" and "output" cost per million tokens
@@ -554,7 +550,12 @@ def get_model_cost(model: str, config: LLMConfig | None = None) -> dict[str, flo
     if config and config.provider in ("ollama", "custom"):
         return {"input": 0.0, "output": 0.0}
 
-    return MODEL_COSTS.get(model, {"input": 1.0, "output": 2.0})
+    entry = CATALOG_BY_ID.get(model)
+    if not entry:
+        return {"input": 1.0, "output": 2.0}
+    if entry.long_context_threshold and input_tokens > entry.long_context_threshold:
+        return {"input": entry.long_input_cost, "output": entry.long_output_cost}
+    return {"input": entry.input_cost, "output": entry.output_cost}
 
 
 # =============================================================================

@@ -288,3 +288,52 @@ class TestOllamaEndpoints:
                 assert response.status_code == 200
                 # Verify the custom URL was passed
                 mock_status.assert_called_once_with("http://custom-host:11434")
+
+
+class TestCloudModelsEndpoint:
+    """Tests for GET /api/models."""
+
+    def test_lists_models_per_provider(self, client):
+        """Should return each cloud provider's models with its defaults."""
+        response = client.get("/api/models")
+
+        assert response.status_code == 200
+        providers = response.json()["providers"]
+        assert set(providers) == {"anthropic", "openai", "gemini"}
+        for catalog in providers.values():
+            ids = [m["id"] for m in catalog["models"]]
+            assert catalog["default_analysis"] in ids
+            assert catalog["default_generation"] in ids
+
+    def test_model_entries_include_limits_and_prices(self, client):
+        """Entries should carry context, track capacity and prices for the UI."""
+        response = client.get("/api/models")
+
+        gemini = response.json()["providers"]["gemini"]["models"]
+        flash_lite = next(m for m in gemini if m["id"] == "gemini-3.5-flash-lite")
+        assert flash_lite["context_window"] == 1_000_000
+        assert flash_lite["max_tracks"] > 20_000
+        assert flash_lite["cost_per_million_input"] == 0.30
+        assert flash_lite["legacy"] is False
+
+
+class TestConfigLongContextPricing:
+    """Tests for long-context pricing in GET /api/config."""
+
+    def test_included_for_models_with_long_pricing(self, client):
+        mock_config = create_mock_config(
+            llm_provider="openai", model_analysis="gpt-6.1-sol", model_generation="gpt-6-luna"
+        )
+        with patch("backend.main.get_config", return_value=mock_config), \
+             patch("backend.main.get_plex_client", return_value=None):
+            data = client.get("/api/config").json()
+
+        assert data["long_context_threshold"] == 272_000
+        assert data["long_context_cost_per_million_input"] == 0.20
+
+    def test_absent_for_flat_priced_models(self, client):
+        with patch("backend.main.get_config", return_value=create_mock_config()), \
+             patch("backend.main.get_plex_client", return_value=None):
+            data = client.get("/api/config").json()
+
+        assert data["long_context_threshold"] is None

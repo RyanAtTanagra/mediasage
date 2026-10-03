@@ -125,9 +125,9 @@ Bring your own API key—or run locally:
 
 | Provider | Max Tracks | Typical Cost | Best For |
 |----------|------------|--------------|----------|
-| **Google Gemini** | ~18,000 | $0.03 – $0.25 | Large libraries, lowest cost |
-| **Anthropic Claude** | ~3,500 | $0.15 – $0.25 | Nuanced recommendations |
-| **OpenAI GPT** | ~2,300 | $0.05 – $0.10 | Solid all-around |
+| **Google Gemini** | ~22,000 | $0.03 – $0.25 | Large libraries, lowest cost |
+| **Anthropic Claude** | ~4,400 (Haiku) / ~22,000 (Sonnet, Opus) | $0.15 – $1.00 | Nuanced recommendations |
+| **OpenAI GPT** | ~23,000 | $0.01 – $0.20 | Solid all-around |
 | **Ollama** ⚗️ | Varies | Free | Privacy, local inference |
 | **Custom** ⚗️ | Configurable | Free | Self-hosted, OpenAI-compatible APIs |
 
@@ -135,7 +135,7 @@ Bring your own API key—or run locally:
 
 > **Free option:** Google Gemini offers a free API tier that's more than enough for personal use — no credit card required. See the [Gemini free credit guide](docs/gemini-free-credit-guide.md) for setup instructions and details.
 
-Estimated cost displays before you generate. MediaSage auto-detects your provider based on which key you configure.
+Estimated cost displays before you generate. MediaSage auto-detects your provider based on which key you configure, and you can pick each provider's models in Settings.
 
 ### Play and Save
 
@@ -340,8 +340,8 @@ plex:
 
 llm:
   provider: "gemini"
-  model_analysis: "gemini-2.5-flash"
-  model_generation: "gemini-2.5-flash"
+  model_analysis: "gemini-3.5-flash-lite"
+  model_generation: "gemini-3.5-flash-lite"
   smart_generation: false  # true = use smarter model for both (higher quality, ~3-5x cost)
 
 defaults:
@@ -354,10 +354,10 @@ MediaSage uses a two-model strategy by default:
 
 | Role | Purpose | Models Used |
 |------|---------|-------------|
-| **Analysis** | Interpret prompts, suggest filters, analyze seed tracks | claude-sonnet-4-5 / gpt-4.1 / gemini-2.5-flash |
-| **Generation** | Select tracks from filtered list | claude-haiku-4-5 / gpt-4.1-mini / gemini-2.5-flash |
+| **Analysis** | Interpret prompts, suggest filters, analyze seed tracks | claude-sonnet-5-5 / gpt-6.1-sol / gemini-3.5-flash-lite |
+| **Generation** | Select tracks from filtered list | claude-haiku-4-5 / gpt-6-luna / gemini-3.5-flash-lite |
 
-This balances quality with cost. Enable `smart_generation: true` to use the analysis model for everything.
+This balances quality with cost. Choose other models in Settings, or with `LLM_MODEL_ANALYSIS` / `LLM_MODEL_GENERATION` (which override Settings). For Claude, a 1M-context generation model such as `claude-sonnet-5-5` fits ~5x more tracks than Haiku at about twice the per-token price. Enable `smart_generation: true` to use the analysis model for everything.
 
 ### Local LLM Setup (Experimental)
 

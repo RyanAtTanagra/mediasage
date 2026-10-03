@@ -685,6 +685,18 @@
                             <label for="llm-api-key">API Key</label>
                             <input type="password" id="llm-api-key" placeholder="Your API key">
                         </div>
+                        <div class="form-group">
+                            <label for="cloud-model-analysis">Analysis Model</label>
+                            <select id="cloud-model-analysis"></select>
+                        </div>
+                        <div class="form-group">
+                            <label for="cloud-model-generation">Generation Model</label>
+                            <select id="cloud-model-generation"></select>
+                            <p id="cloud-model-generation-info" class="filter-hint"></p>
+                            <p id="models-env-warning" class="env-warning hidden">
+                                Set by <code>LLM_MODEL_ANALYSIS</code> / <code>LLM_MODEL_GENERATION</code> environment variables. Edit <code>.env</code> to change.
+                            </p>
+                        </div>
                     </div>
 
                     <!-- Ollama Settings -->

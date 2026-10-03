@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestLLMClientInitialization:
     """Tests for LLM client initialization."""
@@ -750,3 +752,192 @@ class TestJsonParsing:
 
         result = client.parse_json_response(response)
         assert "Line one" in result[0]["reason"]
+
+
+class TestModelCatalog:
+    """Tests for the cloud model catalog."""
+
+    def test_defaults_are_in_catalog(self):
+        """Every cloud provider default should have a known price and context window."""
+        from backend.config import MODEL_DEFAULTS
+        from backend.model_catalog import CATALOG_BY_ID
+
+        for provider in ("anthropic", "openai", "gemini"):
+            for role in ("analysis", "generation"):
+                model = MODEL_DEFAULTS[provider][role]
+                assert model in CATALOG_BY_ID, model
+                assert CATALOG_BY_ID[model].provider == provider
+
+    def test_catalog_yaml_types(self):
+        """YAML values should load as the declared types."""
+        from backend.model_catalog import MODEL_CATALOG
+
+        for m in MODEL_CATALOG:
+            assert isinstance(m.context, int), m.id
+            assert isinstance(m.input_cost, (int, float)), m.id
+            assert isinstance(m.output_cost, (int, float)), m.id
+
+    def test_catalog_rejects_unknown_fields(self, tmp_path):
+        """A typo in a field name should fail loudly, not be ignored."""
+        from backend.model_catalog import load_catalog
+
+        path = tmp_path / "catalog.yaml"
+        path.write_text(
+            "gemini:\n  m:\n    label: M\n    context: 1000\n"
+            "    input_cost: 1\n    output_cost: 2\n    inptu_cost: 3\n"
+        )
+        with pytest.raises(TypeError):
+            load_catalog(path)
+
+    def test_catalog_ids_unique(self):
+        """Model IDs should not repeat."""
+        from backend.model_catalog import CATALOG_BY_ID, MODEL_CATALOG
+
+        assert len(CATALOG_BY_ID) == len(MODEL_CATALOG)
+
+    def test_new_models_get_full_context(self):
+        """1M-context models should fit far more tracks than the 128K fallback."""
+        from backend.llm_client import get_max_tracks_for_model
+
+        assert get_max_tracks_for_model("gemini-3.5-flash-lite") > 20_000
+        assert get_max_tracks_for_model("claude-sonnet-5-5") > 20_000
+        assert get_max_tracks_for_model("claude-haiku-4-5") < 5_000
+
+    def test_long_context_pricing(self):
+        """OpenAI requests above 272K input tokens use the long-context rate."""
+        from backend.llm_client import estimate_cost_for_model
+
+        short = estimate_cost_for_model("gpt-6-luna", 200_000, 0)
+        long = estimate_cost_for_model("gpt-6-luna", 400_000, 0)
+        assert short == 200_000 / 1_000_000 * 0.10
+        assert long == 400_000 / 1_000_000 * 0.20
+
+    def test_flat_pricing_without_threshold(self):
+        """Models without a long-context tier keep their base rate."""
+        from backend.llm_client import estimate_cost_for_model
+
+        cost = estimate_cost_for_model("gemini-3.5-flash-lite", 480_000, 0)
+        assert cost == 480_000 / 1_000_000 * 0.30
+
+
+class TestProviderRequestParams:
+    """Tests for provider-specific request parameters on newer models."""
+
+    def _anthropic_response(self, blocks, stop_reason="end_turn"):
+        response = MagicMock()
+        response.content = blocks
+        response.stop_reason = stop_reason
+        response.usage.input_tokens = 10
+        response.usage.output_tokens = 5
+        return response
+
+    def _block(self, block_type, text=""):
+        block = MagicMock()
+        block.type = block_type
+        block.text = text
+        return block
+
+    def test_anthropic_skips_thinking_blocks(self):
+        """Text should come from text blocks even when a thinking block is first."""
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(
+            provider="anthropic", api_key="k",
+            model_analysis="claude-sonnet-5-5", model_generation="claude-haiku-4-5",
+        )
+        response = self._anthropic_response(
+            [self._block("thinking"), self._block("text", '{"ok": true}')]
+        )
+
+        with patch("backend.llm_client.anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = response
+            mock_anthropic.Anthropic.return_value = mock_client
+
+            result = LLMClient(config).analyze("prompt", "system")
+
+        assert result.content == '{"ok": true}'
+        kwargs = mock_client.messages.create.call_args.kwargs
+        assert kwargs["output_config"] == {"effort": "medium"}
+
+    def test_anthropic_haiku_sends_no_effort(self):
+        """Haiku 4.5 rejects effort, so it must not be sent."""
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(
+            provider="anthropic", api_key="k",
+            model_analysis="claude-haiku-4-5", model_generation="claude-haiku-4-5",
+        )
+
+        with patch("backend.llm_client.anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = self._anthropic_response(
+                [self._block("text", "{}")]
+            )
+            mock_anthropic.Anthropic.return_value = mock_client
+
+            LLMClient(config).analyze("prompt", "system")
+
+        assert "output_config" not in mock_client.messages.create.call_args.kwargs
+
+    def test_anthropic_refusal_raises(self):
+        """A refusal should surface as an error instead of empty content."""
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(
+            provider="anthropic", api_key="k",
+            model_analysis="claude-sonnet-5-5", model_generation="claude-haiku-4-5",
+        )
+
+        with patch("backend.llm_client.anthropic") as mock_anthropic:
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = self._anthropic_response([], "refusal")
+            mock_anthropic.Anthropic.return_value = mock_client
+
+            with pytest.raises(RuntimeError, match="declined"):
+                LLMClient(config).analyze("prompt", "system")
+
+    def _openai_call_kwargs(self, provider, model):
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(
+            provider=provider, api_key="k", model_analysis=model, model_generation=model,
+            custom_url="http://localhost:5000/v1",
+        )
+        response = MagicMock()
+        response.choices = [MagicMock(message=MagicMock(content="{}"))]
+
+        with patch("backend.llm_client.openai") as mock_openai:
+            mock_client = MagicMock()
+            mock_client.chat.completions.create.return_value = response
+            mock_openai.OpenAI.return_value = mock_client
+
+            LLMClient(config).analyze("prompt", "system")
+
+        return mock_client.chat.completions.create.call_args.kwargs
+
+    def test_openai_reasoning_model_params(self):
+        """OpenAI reasoning models use max_completion_tokens and reasoning_effort."""
+        kwargs = self._openai_call_kwargs("openai", "gpt-6-luna")
+
+        assert kwargs["max_completion_tokens"] == 16000
+        assert kwargs["reasoning_effort"] == "low"
+        assert "max_tokens" not in kwargs
+
+    def test_openai_legacy_model_has_no_effort(self):
+        """Non-reasoning OpenAI models don't get reasoning_effort."""
+        kwargs = self._openai_call_kwargs("openai", "gpt-4.1-mini")
+
+        assert kwargs["max_completion_tokens"] == 16000
+        assert "reasoning_effort" not in kwargs
+
+    def test_custom_provider_keeps_max_tokens(self):
+        """Custom OpenAI-compatible servers still get max_tokens."""
+        kwargs = self._openai_call_kwargs("custom", "local-model")
+
+        assert kwargs["max_tokens"] == 8192
+        assert "max_completion_tokens" not in kwargs
