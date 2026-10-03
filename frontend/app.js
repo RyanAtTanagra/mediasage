@@ -119,6 +119,7 @@ const state = {
 
     // Config
     config: null,
+    cloudModels: null,  // From /api/models, keyed by provider
 
     // Cached filter preview (for local cost recalculation)
     lastFilterPreview: null,  // { matching_tracks, tracks_to_send }
@@ -246,6 +247,10 @@ async function updateConfig(updates) {
         method: 'POST',
         body: JSON.stringify(updates),
     });
+}
+
+async function fetchCloudModels() {
+    return apiCall('/models');
 }
 
 // =============================================================================
@@ -1208,25 +1213,13 @@ function updateModelSuggestion() {
     const suggestion = document.getElementById('gemini-suggestion');
     if (!suggestion || !state.config) return;
 
-    const provider = state.config.llm_provider;
+    const LARGE_CONTEXT_MAX = 18000;  // ~1M-token context
     const maxTracks = state.config.max_tracks_to_ai || 3500;
-    const isLocalProvider = state.config.is_local_provider;
 
-    // Cloud provider baselines for comparison
-    const ANTHROPIC_MAX = 3500;  // ~200K context
-    const GEMINI_MAX = 18000;    // ~1M context
-
-    if (isLocalProvider && maxTracks < ANTHROPIC_MAX) {
-        // Local model with small context - suggest a more powerful model
-        suggestion.textContent = 'Switch to a model with a larger context window in Settings for higher track limits.';
-        suggestion.classList.remove('hidden');
-    } else if (!isLocalProvider && provider !== 'gemini') {
-        // Cloud provider that isn't Gemini - suggest Gemini specifically
-        const multiplier = provider === 'openai' ? '8x' : '5x';
-        suggestion.textContent = `Switch to Gemini in Settings for ${multiplier} higher track limits.`;
+    if (maxTracks < LARGE_CONTEXT_MAX) {
+        suggestion.textContent = 'Choose a generation model with a larger context window in Settings for higher track limits.';
         suggestion.classList.remove('hidden');
     } else {
-        // Using Gemini or a local model with large context - no suggestion needed
         suggestion.classList.add('hidden');
     }
 }
@@ -1326,19 +1319,11 @@ function updateRecModelSuggestion() {
     const suggestion = document.getElementById('rec-gemini-suggestion');
     if (!suggestion || !state.config) return;
 
-    const provider = state.config.llm_provider;
+    const LARGE_CONTEXT_MAX_ALBUMS = 35900;  // ~1M-token context
     const maxAlbums = state.config.max_albums_to_ai || 2500;
-    const isLocalProvider = state.config.is_local_provider;
 
-    const ANTHROPIC_MAX_ALBUMS = 7100;
-    const GEMINI_MAX_ALBUMS = 35900;
-
-    if (isLocalProvider && maxAlbums < ANTHROPIC_MAX_ALBUMS) {
-        suggestion.textContent = 'Switch to a model with a larger context window in Settings for higher album limits.';
-        suggestion.classList.remove('hidden');
-    } else if (!isLocalProvider && provider !== 'gemini') {
-        const multiplier = provider === 'openai' ? '8x' : '5x';
-        suggestion.textContent = `Switch to Gemini in Settings for ${multiplier} higher album limits.`;
+    if (maxAlbums < LARGE_CONTEXT_MAX_ALBUMS) {
+        suggestion.textContent = 'Choose a generation model with a larger context window in Settings for higher album limits.';
         suggestion.classList.remove('hidden');
     } else {
         suggestion.classList.add('hidden');
@@ -1494,7 +1479,10 @@ function recalculateCostDisplay() {
     const analysis_cost = (analysis_input / 1_000_000) * analysis_in_rate + (analysis_output / 1_000_000) * analysis_out_rate;
 
     // Generation model cost (e.g. Haiku)
-    const gen_cost = (gen_input / 1_000_000) * state.config.cost_per_million_input + (gen_output / 1_000_000) * state.config.cost_per_million_output;
+    const useLongRate = state.config.long_context_threshold && gen_input > state.config.long_context_threshold;
+    const gen_in_rate = useLongRate ? state.config.long_context_cost_per_million_input : state.config.cost_per_million_input;
+    const gen_out_rate = useLongRate ? state.config.long_context_cost_per_million_output : state.config.cost_per_million_output;
+    const gen_cost = (gen_input / 1_000_000) * gen_in_rate + (gen_output / 1_000_000) * gen_out_rate;
 
     const estimated_cost = analysis_cost + gen_cost;
 
@@ -1790,7 +1778,69 @@ function showProviderSettings(provider) {
     } else {
         // Cloud providers (anthropic, openai, gemini)
         cloudSettings.classList.remove('hidden');
+        populateCloudModels(provider);
     }
+}
+
+function formatContextWindow(tokens) {
+    return tokens >= 1_000_000 ? `${tokens / 1_000_000}M` : `${tokens / 1000}K`;
+}
+
+async function populateCloudModels(provider) {
+    const analysisSelect = document.getElementById('cloud-model-analysis');
+    const generationSelect = document.getElementById('cloud-model-generation');
+
+    if (!state.cloudModels) {
+        try {
+            state.cloudModels = (await fetchCloudModels()).providers;
+        } catch (error) {
+            console.error('Error loading cloud models:', error);
+            return;
+        }
+    }
+
+    const catalog = state.cloudModels[provider];
+    if (!catalog) return;
+
+    // Saved models for the active provider, defaults when switching to another
+    const isActive = state.config?.llm_provider === provider;
+    const selectedAnalysis = isActive ? state.config.model_analysis : catalog.default_analysis;
+    const selectedGeneration = isActive ? state.config.model_generation : catalog.default_generation;
+
+    const buildOptions = (selected) => {
+        const options = catalog.models.map(m => {
+            const price = `$${m.cost_per_million_input} / $${m.cost_per_million_output} per M`;
+            const legacy = m.legacy ? ' (legacy)' : '';
+            const text = `${m.label}${legacy} · ${formatContextWindow(m.context_window)} · ${price}`;
+            return `<option value="${escapeHtml(m.id)}">${escapeHtml(text)}</option>`;
+        });
+        // Keep a model set in YAML that isn't in the catalog
+        if (selected && !catalog.models.some(m => m.id === selected)) {
+            options.push(`<option value="${escapeHtml(selected)}">${escapeHtml(selected)} (custom)</option>`);
+        }
+        return options.join('');
+    };
+
+    analysisSelect.innerHTML = buildOptions(selectedAnalysis);
+    generationSelect.innerHTML = buildOptions(selectedGeneration);
+    analysisSelect.value = selectedAnalysis;
+    generationSelect.value = selectedGeneration;
+
+    const fromEnv = Boolean(state.config?.models_from_env);
+    analysisSelect.disabled = fromEnv;
+    generationSelect.disabled = fromEnv;
+    document.getElementById('models-env-warning').classList.toggle('hidden', !fromEnv);
+
+    updateCloudModelInfo();
+}
+
+function updateCloudModelInfo() {
+    const provider = document.getElementById('llm-provider').value;
+    const modelId = document.getElementById('cloud-model-generation').value;
+    const info = document.getElementById('cloud-model-generation-info');
+    const model = state.cloudModels?.[provider]?.models.find(m => m.id === modelId);
+
+    info.textContent = model ? `Fits ~${model.max_tracks.toLocaleString()} tracks per request.` : '';
 }
 
 async function checkOllamaStatus(url) {
@@ -2714,6 +2764,8 @@ function setupEventListeners() {
         showProviderSettings(e.target.value);
     });
 
+    document.getElementById('cloud-model-generation').addEventListener('change', updateCloudModelInfo);
+
     // Library refresh link
     const refreshLink = document.getElementById('footer-refresh-link');
     if (refreshLink) {
@@ -3292,6 +3344,12 @@ async function handleSaveSettings() {
     } else {
         // Cloud providers need API key
         if (llmApiKey) updates.llm_api_key = llmApiKey;
+        if (!state.config?.models_from_env) {
+            const cloudModelAnalysis = document.getElementById('cloud-model-analysis').value;
+            const cloudModelGeneration = document.getElementById('cloud-model-generation').value;
+            if (cloudModelAnalysis) updates.model_analysis = cloudModelAnalysis;
+            if (cloudModelGeneration) updates.model_generation = cloudModelGeneration;
+        }
     }
 
     if (Object.keys(updates).length === 0) {

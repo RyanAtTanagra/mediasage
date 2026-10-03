@@ -423,6 +423,11 @@ class ConfigResponse(BaseModel):
     custom_context_window: int = 32768
     is_local_provider: bool = False
     provider_from_env: bool = False  # True if LLM_PROVIDER env var is overriding UI
+    models_from_env: bool = False  # True if LLM_MODEL_* env vars are overriding UI
+    # Generation model's long-context pricing, if any
+    long_context_threshold: int | None = None
+    long_context_cost_per_million_input: float | None = None
+    long_context_cost_per_million_output: float | None = None
 
 
 class UpdateConfigRequest(BaseModel):
@@ -468,6 +473,32 @@ class OllamaModel(BaseModel):
     name: str
     size: int = 0
     modified_at: str = ""
+
+
+class CloudModel(BaseModel):
+    """A cloud model offered in Settings."""
+
+    id: str
+    label: str
+    context_window: int
+    max_tracks: int
+    cost_per_million_input: float
+    cost_per_million_output: float
+    legacy: bool = False
+
+
+class CloudProviderModels(BaseModel):
+    """Models offered for one cloud provider, with its defaults."""
+
+    models: list[CloudModel]
+    default_analysis: str
+    default_generation: str
+
+
+class CloudModelsResponse(BaseModel):
+    """Cloud models keyed by provider."""
+
+    providers: dict[str, CloudProviderModels]
 
 
 class OllamaModelInfo(BaseModel):

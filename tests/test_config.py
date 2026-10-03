@@ -172,6 +172,39 @@ class TestLoadConfig:
             config = load_config(config_file)
             assert config.llm.api_key == "openai-key"
 
+    def test_ui_saved_key_loaded_for_gemini_and_openai(self, tmp_path, monkeypatch):
+        """A UI-saved api_key should be used for Gemini/OpenAI when no env var is set."""
+        for var in ["PLEX_URL", "PLEX_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                    "GEMINI_API_KEY", "LLM_PROVIDER", "LLM_MODEL_ANALYSIS", "LLM_MODEL_GENERATION"]:
+            monkeypatch.delenv(var, raising=False)
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+
+        for provider in ("gemini", "openai"):
+            user_config = {"llm": {"provider": provider, "api_key": f"{provider}-ui-key"}}
+            with patch("backend.config.load_user_yaml_config", return_value=user_config):
+                config = load_config(config_file)
+            assert config.llm.provider == provider
+            assert config.llm.api_key == f"{provider}-ui-key"
+
+    def test_ui_saved_key_not_used_for_other_provider(self, tmp_path, monkeypatch):
+        """A key saved for one provider should not be sent to another."""
+        for var in ["PLEX_URL", "PLEX_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                    "GEMINI_API_KEY", "LLM_PROVIDER", "LLM_MODEL_ANALYSIS", "LLM_MODEL_GENERATION"]:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("LLM_PROVIDER", "openai")
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+        user_config = {"llm": {"provider": "gemini", "api_key": "gemini-ui-key"}}
+
+        with patch("backend.config.load_user_yaml_config", return_value=user_config):
+            config = load_config(config_file)
+
+        assert config.llm.provider == "openai"
+        assert config.llm.api_key == ""
+
     def test_default_models_for_anthropic(self, tmp_path, monkeypatch):
         """Should use default Anthropic models when not specified."""
         for var in ["PLEX_URL", "PLEX_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",

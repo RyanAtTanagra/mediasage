@@ -43,16 +43,16 @@ def remove_empty_values(d: dict[str, Any]) -> dict[str, Any]:
 # Default model mappings per provider
 MODEL_DEFAULTS = {
     "anthropic": {
-        "analysis": "claude-sonnet-4-5",
+        "analysis": "claude-sonnet-5-5",
         "generation": "claude-haiku-4-5",
     },
     "openai": {
-        "analysis": "gpt-4.1",
-        "generation": "gpt-4.1-mini",
+        "analysis": "gpt-6.1-sol",
+        "generation": "gpt-6-luna",
     },
     "gemini": {
-        "analysis": "gemini-2.5-flash",
-        "generation": "gemini-2.5-flash",
+        "analysis": "gemini-3.5-flash-lite",
+        "generation": "gemini-3.5-flash-lite",
     },
     "ollama": {
         "analysis": "",  # Populated from Ollama API
@@ -151,6 +151,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     llm_yaml = yaml_config.get("llm", {})
     defaults_yaml = yaml_config.get("defaults", {})
 
+    yaml_provider = llm_yaml.get("provider")
+
     # Determine LLM provider - explicit setting or auto-detect from API keys
     explicit_provider = get_env_or_yaml(
         "LLM_PROVIDER", llm_yaml.get("provider"), None
@@ -158,8 +160,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     # Check which API keys are available
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY") or llm_yaml.get("api_key", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    # A UI-saved key belongs to the provider it was saved with
+    openai_key = os.environ.get("OPENAI_API_KEY") or (
+        llm_yaml.get("api_key", "") if yaml_provider == "openai" else ""
+    )
+    gemini_key = os.environ.get("GEMINI_API_KEY") or (
+        llm_yaml.get("api_key", "") if yaml_provider == "gemini" else ""
+    )
 
     # Auto-detect provider if not explicitly set
     if explicit_provider:
@@ -222,7 +229,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     # When env var overrides to a DIFFERENT provider, use that provider's defaults
     # (prevents using custom provider's model names with gemini provider, etc.)
     env_provider = os.environ.get("LLM_PROVIDER")
-    yaml_provider = llm_yaml.get("provider")
     provider_changed_by_env = env_provider and env_provider != yaml_provider
 
     if provider_changed_by_env:
