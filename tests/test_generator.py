@@ -49,7 +49,7 @@ class TestPlaylistGeneration:
             ]
             mock_llm.return_value = mock_client
 
-            with patch("backend.generator.get_plex_client") as mock_plex:
+            with patch("backend.generator.get_current_media_client") as mock_plex:
                 mock_plex_client = MagicMock()
                 mock_plex_client.get_tracks_by_filters.return_value = mock_plex_tracks[:5]
                 mock_plex.return_value = mock_plex_client
@@ -81,7 +81,7 @@ class TestPlaylistGeneration:
         with patch("backend.generator.get_llm_client") as mock_llm:
             mock_llm.return_value = MagicMock()
 
-            with patch("backend.generator.get_plex_client") as mock_plex:
+            with patch("backend.generator.get_current_media_client") as mock_plex:
                 mock_plex_client = MagicMock()
                 mock_plex_client.get_tracks_by_filters.return_value = []
                 mock_plex.return_value = mock_plex_client
@@ -126,7 +126,7 @@ class TestPlaylistGeneration:
             ]
             mock_llm.return_value = mock_client
 
-            with patch("backend.generator.get_plex_client") as mock_plex:
+            with patch("backend.generator.get_current_media_client") as mock_plex:
                 mock_plex_client = MagicMock()
                 mock_plex_client.get_tracks_by_filters.return_value = mock_plex_tracks[:5]
                 mock_plex.return_value = mock_plex_client

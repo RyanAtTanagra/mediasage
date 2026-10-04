@@ -30,6 +30,10 @@ def create_mock_config(
 ):
     """Create a properly structured mock config."""
     mock = MagicMock()
+    mock.media_server = "plex"
+    mock.jellyfin.url = ""
+    mock.jellyfin.token = ""
+    mock.jellyfin.music_library = "Music"
     mock.plex.url = plex_url
     mock.plex.token = plex_token
     mock.plex.music_library = music_library
@@ -50,7 +54,7 @@ class TestHealthEndpoint:
     def test_health_check_returns_status(self, client):
         """Should return health status."""
         with patch("backend.main.get_config") as mock_config:
-            with patch("backend.main.get_plex_client") as mock_plex:
+            with patch("backend.main.get_current_media_client") as mock_plex:
                 mock_config.return_value = create_mock_config()
                 mock_plex.return_value = MagicMock(is_connected=MagicMock(return_value=True))
 
@@ -64,7 +68,7 @@ class TestHealthEndpoint:
     def test_health_check_shows_plex_status(self, client):
         """Should show Plex connection status."""
         with patch("backend.main.get_config") as mock_config:
-            with patch("backend.main.get_plex_client") as mock_plex:
+            with patch("backend.main.get_current_media_client") as mock_plex:
                 mock_config.return_value = create_mock_config()
                 mock_plex.return_value = MagicMock(is_connected=MagicMock(return_value=True))
 
@@ -78,7 +82,7 @@ class TestHealthEndpoint:
     def test_health_check_shows_llm_status(self, client):
         """Should show LLM configuration status."""
         with patch("backend.main.get_config") as mock_config:
-            with patch("backend.main.get_plex_client") as mock_plex:
+            with patch("backend.main.get_current_media_client") as mock_plex:
                 mock_config.return_value = create_mock_config(llm_api_key="key")
                 mock_plex.return_value = None  # No Plex client
 
