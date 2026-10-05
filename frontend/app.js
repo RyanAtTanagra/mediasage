@@ -1716,7 +1716,6 @@ function updateSettings() {
 
     const mediaServer = state.config.media_server || 'plex';
     document.getElementById('settings-media-server').value = mediaServer;
-    document.getElementById('media-server-env-warning').classList.toggle('hidden', !state.config.media_server_from_env);
     showServerFields('settings', mediaServer);
 
     document.getElementById('plex-url').value = state.config.plex_url || '';
@@ -1728,12 +1727,6 @@ function updateSettings() {
     document.getElementById('jellyfin-token').placeholder = state.config.jellyfin_token_set
         ? '•••••••••••••••• (configured)'
         : 'Your Jellyfin API key';
-
-    // Show warning if provider is set by environment variable
-    const providerEnvWarning = document.getElementById('provider-env-warning');
-    if (providerEnvWarning) {
-        providerEnvWarning.classList.toggle('hidden', !state.config.provider_from_env);
-    }
 
     // Update token/key placeholders to indicate if configured
     const plexTokenInput = document.getElementById('plex-token');
@@ -1786,6 +1779,47 @@ function updateSettings() {
 
     // Show provider-specific settings
     showProviderSettings(state.config.llm_provider);
+    applyEnvOverrides();
+}
+
+// Settings inputs for each field an environment variable can override (env_overrides in /api/config)
+const ENV_OVERRIDABLE_INPUTS = {
+    media_server: ['settings-media-server'],
+    plex_url: ['plex-url'],
+    plex_token: ['plex-token'],
+    music_library: ['music-library'],
+    jellyfin_url: ['jellyfin-url'],
+    jellyfin_token: ['jellyfin-token'],
+    jellyfin_music_library: ['jellyfin-music-library'],
+    llm_provider: ['llm-provider'],
+    llm_api_key: ['llm-api-key', 'custom-api-key'],
+    model_analysis: ['cloud-model-analysis'],
+    model_generation: ['cloud-model-generation'],
+    ollama_url: ['ollama-url'],
+    custom_url: ['custom-url'],
+};
+
+function applyEnvOverrides() {
+    const overrides = state.config.env_overrides || {};
+    for (const [field, ids] of Object.entries(ENV_OVERRIDABLE_INPUTS)) {
+        const envVar = overrides[field];
+        for (const id of ids) {
+            const input = document.getElementById(id);
+            input.disabled = Boolean(envVar);
+
+            let note = document.getElementById(`${id}-env-note`);
+            if (envVar && !note) {
+                note = document.createElement('p');
+                note.id = `${id}-env-note`;
+                note.className = 'env-warning';
+                input.insertAdjacentElement('afterend', note);
+            }
+            if (note) {
+                note.innerHTML = envVar ? `Set by the <code>${escapeHtml(envVar)}</code> environment variable.` : '';
+                note.classList.toggle('hidden', !envVar);
+            }
+        }
+    }
 }
 
 function showServerFields(prefix, server) {
@@ -1872,11 +1906,6 @@ async function populateCloudModels(provider) {
     generationSelect.innerHTML = buildOptions(selectedGeneration);
     analysisSelect.value = selectedAnalysis;
     generationSelect.value = selectedGeneration;
-
-    const fromEnv = Boolean(state.config?.models_from_env);
-    analysisSelect.disabled = fromEnv;
-    generationSelect.disabled = fromEnv;
-    document.getElementById('models-env-warning').classList.toggle('hidden', !fromEnv);
 
     updateCloudModelInfo();
 }
@@ -3406,12 +3435,15 @@ async function handleSaveSettings() {
     } else {
         // Cloud providers need API key
         if (llmApiKey) updates.llm_api_key = llmApiKey;
-        if (!state.config?.models_from_env) {
-            const cloudModelAnalysis = document.getElementById('cloud-model-analysis').value;
-            const cloudModelGeneration = document.getElementById('cloud-model-generation').value;
-            if (cloudModelAnalysis) updates.model_analysis = cloudModelAnalysis;
-            if (cloudModelGeneration) updates.model_generation = cloudModelGeneration;
-        }
+        const cloudModelAnalysis = document.getElementById('cloud-model-analysis').value;
+        const cloudModelGeneration = document.getElementById('cloud-model-generation').value;
+        if (cloudModelAnalysis) updates.model_analysis = cloudModelAnalysis;
+        if (cloudModelGeneration) updates.model_generation = cloudModelGeneration;
+    }
+
+    // Fields set by environment variables are read-only here
+    for (const field of Object.keys(state.config?.env_overrides || {})) {
+        delete updates[field];
     }
 
     if (Object.keys(updates).length === 0) {

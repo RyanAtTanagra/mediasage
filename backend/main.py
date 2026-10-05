@@ -17,7 +17,16 @@ from fastapi.responses import HTMLResponse
 from starlette.responses import StreamingResponse
 import httpx
 
-from backend.config import get_config, get_current_media_client, update_config_values, load_user_yaml_config, save_user_config, ConfigSaveError, MODEL_DEFAULTS
+from backend.config import (
+    MODEL_DEFAULTS,
+    ConfigSaveError,
+    env_overrides,
+    get_config,
+    get_current_media_client,
+    load_user_yaml_config,
+    save_user_config,
+    update_config_values,
+)
 from backend.version import get_version
 from backend.models import (
     AlbumCandidate,
@@ -214,11 +223,7 @@ def _build_config_response(config, media_client) -> ConfigResponse:
         custom_url=config.llm.custom_url,
         custom_context_window=config.llm.custom_context_window,
         is_local_provider=is_local,
-        provider_from_env=os.environ.get("LLM_PROVIDER") is not None,
-        media_server_from_env=os.environ.get("MEDIA_SERVER") is not None,
-        models_from_env=bool(
-            os.environ.get("LLM_MODEL_ANALYSIS") or os.environ.get("LLM_MODEL_GENERATION")
-        ),
+        env_overrides=env_overrides(config.llm.provider),
         long_context_threshold=gen_entry.long_context_threshold if gen_entry else None,
         long_context_cost_per_million_input=gen_entry.long_input_cost if gen_entry else None,
         long_context_cost_per_million_output=gen_entry.long_output_cost if gen_entry else None,

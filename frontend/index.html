@@ -680,9 +680,6 @@
                             <option value="plex">Plex</option>
                             <option value="jellyfin">Jellyfin</option>
                         </select>
-                        <p id="media-server-env-warning" class="env-warning hidden">
-                            Set by <code>MEDIA_SERVER</code> environment variable. Edit <code>.env</code> to change.
-                        </p>
                     </div>
                     <!-- Plex settings -->
                     <div id="settings-plex-fields">
@@ -740,9 +737,6 @@
                             <option value="ollama">Ollama (Local)</option>
                             <option value="custom">Custom (OpenAI-compatible)</option>
                         </select>
-                        <p id="provider-env-warning" class="env-warning hidden">
-                            Set by <code>LLM_PROVIDER</code> environment variable. Edit <code>.env</code> to change.
-                        </p>
                     </div>
 
                     <!-- Cloud Provider Settings (anthropic, openai, gemini) -->
@@ -759,9 +753,6 @@
                             <label for="cloud-model-generation">Generation Model</label>
                             <select id="cloud-model-generation"></select>
                             <p id="cloud-model-generation-info" class="filter-hint"></p>
-                            <p id="models-env-warning" class="env-warning hidden">
-                                Set by <code>LLM_MODEL_ANALYSIS</code> / <code>LLM_MODEL_GENERATION</code> environment variables. Edit <code>.env</code> to change.
-                            </p>
                         </div>
                     </div>
 

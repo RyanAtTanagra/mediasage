@@ -6,6 +6,7 @@ import yaml
 
 from backend.config import (
     deep_merge,
+    env_overrides,
     get_env_or_yaml,
     load_config,
     load_yaml_config,
@@ -76,13 +77,13 @@ class TestGetEnvOrYaml:
 
         assert result == "default"
 
-    def test_empty_string_env_var_is_used(self, monkeypatch):
-        """Empty string env var should still take priority."""
+    def test_empty_env_var_counts_as_unset(self, monkeypatch):
+        """An empty variable (e.g. PLEX_URL=${PLEX_URL:-} in compose) must not override Settings."""
         monkeypatch.setenv("TEST_VAR", "")
 
         result = get_env_or_yaml("TEST_VAR", "yaml_value", "default")
 
-        assert result == ""
+        assert result == "yaml_value"
 
 
 class TestLoadConfig:
@@ -527,3 +528,51 @@ class TestLocalProviderConfig:
             config = load_config(config_file)
 
         assert config.llm.custom_context_window == 32768
+
+
+class TestEnvOverrides:
+    """Settings fields controlled by environment variables."""
+
+    ENV_VARS = [
+        "MEDIA_SERVER", "PLEX_URL", "PLEX_TOKEN", "PLEX_MUSIC_LIBRARY", "JELLYFIN_URL",
+        "JELLYFIN_TOKEN", "JELLYFIN_MUSIC_LIBRARY", "LLM_PROVIDER", "LLM_MODEL_ANALYSIS",
+        "LLM_MODEL_GENERATION", "OLLAMA_URL", "CUSTOM_LLM_URL", "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY", "GEMINI_API_KEY", "CUSTOM_LLM_API_KEY",
+    ]
+
+    def _clear(self, monkeypatch):
+        for var in self.ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+
+    def test_reports_only_non_empty_variables(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("PLEX_URL", "http://plex:32400")
+        monkeypatch.setenv("PLEX_TOKEN", "")  # compose's ${PLEX_TOKEN:-} when unset
+
+        assert env_overrides("gemini") == {"plex_url": "PLEX_URL"}
+
+    def test_api_key_follows_active_provider(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("GEMINI_API_KEY", "key")
+
+        assert env_overrides("gemini") == {"llm_api_key": "GEMINI_API_KEY"}
+        assert env_overrides("anthropic") == {}
+
+    def test_empty_compose_variables_keep_saved_settings(self, tmp_path, monkeypatch):
+        self._clear(monkeypatch)
+        for var in ("PLEX_URL", "PLEX_TOKEN", "PLEX_MUSIC_LIBRARY", "MEDIA_SERVER", "JELLYFIN_URL"):
+            monkeypatch.setenv(var, "")
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+        saved = {
+            "media_server": "plex",
+            "plex": {"url": "http://saved:32400", "token": "saved-token", "music_library": "Tunes"},
+        }
+
+        with patch("backend.config.load_user_yaml_config", return_value=saved):
+            config = load_config(config_file)
+
+        assert config.media_server == "plex"
+        assert config.plex.url == "http://saved:32400"
+        assert config.plex.token == "saved-token"
+        assert config.plex.music_library == "Tunes"

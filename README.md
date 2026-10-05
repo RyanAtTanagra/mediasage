@@ -162,25 +162,20 @@ curl -O https://raw.githubusercontent.com/RyanAtTanagra/mediasage/main/.env.exam
 mv .env.example .env
 ```
 
-Edit `.env`:
-
-```bash
-PLEX_URL=http://your-plex-server:32400
-PLEX_TOKEN=your-plex-token
-
-# Choose ONE provider:
-GEMINI_API_KEY=your-gemini-key
-# ANTHROPIC_API_KEY=sk-ant-your-key
-# OPENAI_API_KEY=sk-your-key
-```
-
-Start:
+Start it and open **http://localhost:5765** to run the setup wizard:
 
 ```bash
 docker compose up -d
 ```
 
-**Using Jellyfin?** Leave the Plex lines out of `.env`, start the container, and choose Jellyfin in the setup wizard. To configure it with environment variables instead, uncomment the `JELLYFIN_*` lines in `docker-compose.yml` and set them in `.env`.
+`.env` is optional. To manage some settings there instead of in the UI, uncomment them in `.env`, for example:
+
+```bash
+PLEX_URL=http://your-plex-server:32400
+PLEX_TOKEN=your-plex-token
+GEMINI_API_KEY=your-gemini-key
+# Or for Jellyfin: JELLYFIN_URL, JELLYFIN_TOKEN
+```
 
 ### NAS Platforms
 
@@ -221,9 +216,7 @@ Community Apps, install it through **Docker → Add Container**:
 4. Open the WebUI and complete the setup wizard
 
 The template runs the container as Unraid's standard `nobody:users` account
-(`99:100`) so Docker-created appdata is writable. Avoid adding blank optional
-environment variables: environment values override settings saved through the
-setup wizard.
+(`99:100`) so Docker-created appdata is writable.
 
 Maintainers can publish the template by submitting this repository through the
 [Unraid Community Apps portal](https://ca.unraid.net/submit). The portal still
@@ -320,7 +313,7 @@ The usual way to configure MediaSage is the setup wizard on first launch, then t
 
 ### Environment Variables
 
-Environment variables are optional, for scripted or automated installs. **A variable that's set always overrides what's saved in Settings**, even if its value is empty, so only set the ones you mean to control. Settings shows a note next to the media server, AI provider and model fields when a variable controls them.
+Environment variables are optional, for scripted or automated installs. A variable with a value overrides what's saved in Settings, and the matching field in Settings is locked with a note naming the variable. Empty variables are ignored, so the compose file's `PLEX_URL=${PLEX_URL:-}`-style lines are harmless when `.env` leaves them unset.
 
 | Variable | Description |
 |----------|-------------|

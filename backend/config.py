@@ -124,13 +124,50 @@ def save_user_config(updates: dict[str, Any]) -> None:
 def get_env_or_yaml(
     env_key: str, yaml_value: Any, default: Any = None
 ) -> Any:
-    """Get value from environment variable or fall back to YAML value."""
+    """Get value from environment variable or fall back to YAML value.
+
+    An empty variable counts as unset, so compose lines like PLEX_URL=${PLEX_URL:-}
+    don't override what was saved in Settings.
+    """
     env_value = os.environ.get(env_key)
-    if env_value is not None:
+    if env_value:
         return env_value
     if yaml_value is not None:
         return yaml_value
     return default
+
+
+# Settings fields that an environment variable overrides, keyed by UpdateConfigRequest field
+_ENV_OVERRIDABLE = {
+    "media_server": "MEDIA_SERVER",
+    "plex_url": "PLEX_URL",
+    "plex_token": "PLEX_TOKEN",
+    "music_library": "PLEX_MUSIC_LIBRARY",
+    "jellyfin_url": "JELLYFIN_URL",
+    "jellyfin_token": "JELLYFIN_TOKEN",
+    "jellyfin_music_library": "JELLYFIN_MUSIC_LIBRARY",
+    "llm_provider": "LLM_PROVIDER",
+    "model_analysis": "LLM_MODEL_ANALYSIS",
+    "model_generation": "LLM_MODEL_GENERATION",
+    "ollama_url": "OLLAMA_URL",
+    "custom_url": "CUSTOM_LLM_URL",
+}
+
+_API_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "custom": "CUSTOM_LLM_API_KEY",
+}
+
+
+def env_overrides(provider: str) -> dict[str, str]:
+    """Settings fields currently set by environment variables, mapped to the variable name."""
+    overrides = {field: var for field, var in _ENV_OVERRIDABLE.items() if os.environ.get(var)}
+    key_var = _API_KEY_ENV.get(provider)
+    if key_var and os.environ.get(key_var):
+        overrides["llm_api_key"] = key_var
+    return overrides
 
 
 def load_config(config_path: Path | None = None) -> AppConfig:

@@ -9,22 +9,23 @@ services:
     ports:
       - "5765:5765"
     environment:
-      # Media server selection: "plex" or "jellyfin" (auto-detected if only one URL is set)
-      #- MEDIA_SERVER=plex
+      # All optional: you can configure everything in the setup wizard instead.
+      # Values set in .env override Settings; anything left empty is ignored.
 
-      # Plex server settings (use if MEDIA_SERVER=plex)
+      # Media server selection: "plex" or "jellyfin" (auto-detected if only one URL is set)
+      - MEDIA_SERVER=${MEDIA_SERVER:-}
+
+      # Plex server settings
       - PLEX_URL=${PLEX_URL:-}
       - PLEX_TOKEN=${PLEX_TOKEN:-}
-      - PLEX_MUSIC_LIBRARY=${PLEX_MUSIC_LIBRARY:-Music}
+      - PLEX_MUSIC_LIBRARY=${PLEX_MUSIC_LIBRARY:-}
       # Optional: Plex URL as reached from browsers/phones, if different from PLEX_URL
-      #- PLEX_PUBLIC_URL=https://plex.example.com
+      - PLEX_PUBLIC_URL=${PLEX_PUBLIC_URL:-}
 
-      # Jellyfin server settings (use if MEDIA_SERVER=jellyfin). Left commented out because
-      # a set variable, even an empty one, overrides what the setup wizard saves.
-      # API key: create in Jellyfin Dashboard > API Keys
-      #- JELLYFIN_URL=http://your-jellyfin-server:8096
-      #- JELLYFIN_TOKEN=your-jellyfin-api-key
-      #- JELLYFIN_MUSIC_LIBRARY=Music
+      # Jellyfin server settings (API key: Jellyfin Dashboard > API Keys)
+      - JELLYFIN_URL=${JELLYFIN_URL:-}
+      - JELLYFIN_TOKEN=${JELLYFIN_TOKEN:-}
+      - JELLYFIN_MUSIC_LIBRARY=${JELLYFIN_MUSIC_LIBRARY:-}
 
       # Performance tuning
       - UVICORN_WORKERS=${UVICORN_WORKERS:-1}
@@ -39,8 +40,8 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
 
       # Optional: Override default models
-      #- LLM_MODEL_ANALYSIS=gemini-2.5-flash
-      #- LLM_MODEL_GENERATION=gemini-2.5-flash
+      #- LLM_MODEL_ANALYSIS=gemini-3.5-flash-lite
+      #- LLM_MODEL_GENERATION=gemini-3.5-flash-lite
 
       # Local LLM: Ollama (experimental)
       #- LLM_PROVIDER=ollama
@@ -53,10 +54,8 @@ services:
       #- CUSTOM_LLM_API_KEY=sk-or-your-key
       #- CUSTOM_CONTEXT_WINDOW=32768
     volumes:
-      # Persist library cache across restarts
+      # Settings (config.user.yaml) and the library cache live here
       # Ensure directory is writable: either set 'user' above, or run:
       #   mkdir -p ./data && chmod 777 ./data
       - ./data:/app/data
-      # Optional: persist UI settings
-      # - ./config.user.yaml:/app/config.user.yaml
     restart: unless-stopped

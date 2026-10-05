@@ -443,9 +443,8 @@ class ConfigResponse(BaseModel):
     custom_url: str = ""
     custom_context_window: int = 32768
     is_local_provider: bool = False
-    provider_from_env: bool = False  # True if LLM_PROVIDER env var is overriding UI
-    media_server_from_env: bool = False  # True if MEDIA_SERVER env var is overriding UI
-    models_from_env: bool = False  # True if LLM_MODEL_* env vars are overriding UI
+    # Settings fields set by environment variables (which override Settings), e.g. {"plex_url": "PLEX_URL"}
+    env_overrides: dict[str, str] = {}
     # Generation model's long-context pricing, if any
     long_context_threshold: int | None = None
     long_context_cost_per_million_input: float | None = None
