@@ -106,6 +106,7 @@ Describe a mood or moment, answer two quick questions about your preferences, an
 Before the AI sees anything, you control the pool:
 - **Genres** — Select from your library's actual genre tags
 - **Decades** — Filter by era
+- **Artists** — Only include, or leave out, specific artists. Ask for "a Radiohead playlist" and the artist filter is filled in for you (matched on album artist, so tracks on "Various Artists" compilations aren't included)
 - **Minimum rating** — Only tracks rated 3+, 4+, etc. (Plex only; Jellyfin has no star ratings)
 - **Exclude live versions** — Skip concert recordings automatically
 
@@ -512,6 +513,7 @@ Interactive documentation available at `/docs` when running.
 | `/api/library/status` | GET | Cache state, track count, sync progress |
 | `/api/library/sync` | POST | Trigger background library sync |
 | `/api/library/search` | GET | Search library tracks |
+| `/api/library/artists` | GET | Search library artists (for the artist filter) |
 | `/api/analyze/prompt` | POST | Analyze natural language prompt |
 | `/api/analyze/track` | POST | Analyze a seed track |
 | `/api/filter/preview` | POST | Preview filtered track list |

@@ -37,6 +37,7 @@ from backend.models import (
     AnalyzePromptResponse,
     AnalyzeTrackRequest,
     AnalyzeTrackResponse,
+    ArtistCount,
     CloudModel,
     CloudModelsResponse,
     CloudProviderModels,
@@ -737,6 +738,15 @@ async def get_library_stats_cached() -> LibraryStatsResponse:
     )
 
 
+@app.get("/api/library/artists", response_model=list[ArtistCount])
+async def search_library_artists(q: str = Query("", description="Part of an artist name")) -> list[ArtistCount]:
+    """Artists in the synced library matching q, most tracks first (for the artist filter)."""
+    if not library_cache.has_cached_tracks():
+        return []
+    artists = await asyncio.to_thread(library_cache.search_artists, q.strip())
+    return [ArtistCount(**a) for a in artists]
+
+
 @app.get("/api/library/search", response_model=list[Track])
 async def search_library(q: str = Query(..., description="Search query")) -> list[Track]:
     """Search for tracks in the library."""
@@ -820,6 +830,8 @@ async def preview_filters(request: FilterPreviewRequest) -> FilterPreviewRespons
             decades=decades,
             min_rating=min_rating,
             exclude_live=exclude_live,
+            artists=request.artists,
+            exclude_artists=request.exclude_artists,
         )
 
     if matching_tracks < 0:
@@ -919,6 +931,8 @@ async def generate_playlist_sse(request: GenerateRequest) -> StreamingResponse:
             exclude_live=request.exclude_live,
             min_rating=request.min_rating,
             max_tracks_to_ai=request.max_tracks_to_ai,
+            artists=request.artists,
+            exclude_artists=request.exclude_artists,
         )
 
     return StreamingResponse(

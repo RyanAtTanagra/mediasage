@@ -163,6 +163,13 @@ class GenreCount(BaseModel):
     count: int | None = None
 
 
+class ArtistCount(BaseModel):
+    """Artist with track count."""
+
+    name: str
+    count: int
+
+
 class DecadeCount(BaseModel):
     """Decade with track count."""
 
@@ -189,6 +196,7 @@ class AnalyzePromptResponse(BaseModel):
 
     suggested_genres: list[str]
     suggested_decades: list[str]
+    suggested_artists: list[str] = []  # Artists the prompt names that are in the library
     available_genres: list[GenreCount]
     available_decades: list[DecadeCount]
     reasoning: str
@@ -216,6 +224,8 @@ class FilterPreviewRequest(BaseModel):
 
     genres: list[str] = []
     decades: list[str] = []
+    artists: list[str] = []  # Only these artists
+    exclude_artists: list[str] = []
     track_count: int = 25
     max_tracks_to_ai: int = 500  # 0 = no limit
     min_rating: int = 0  # 0 = any, 2/4/6/8/10 = minimum rating (Plex uses 0-10)
@@ -248,6 +258,8 @@ class GenerateRequest(BaseModel):
     refinement_answers: list[str | None] | None = None
     genres: list[str]
     decades: list[str]
+    artists: list[str] = []  # Only these artists
+    exclude_artists: list[str] = []
     track_count: int = 25
     exclude_live: bool = True
     min_rating: int = 0  # 0 = any, 2/4/6/8/10 = minimum rating

@@ -92,6 +92,8 @@ const state = {
     availableDecades: [],
     selectedGenres: [],
     selectedDecades: [],
+    includedArtists: [],
+    excludedArtists: [],
     trackCount: 25,
     excludeLive: true,
     maxTracksToAI: 500,  // 0 = no limit
@@ -525,6 +527,10 @@ async function sendPlaylistUpdate(playlistId, ratingKeys, mode, description = ''
             description,
         }),
     });
+}
+
+async function fetchArtists(query) {
+    return apiCall(`/library/artists?q=${encodeURIComponent(query)}`);
 }
 
 async function fetchLibraryStats() {
@@ -1136,6 +1142,69 @@ function updateStep() {
     }
 }
 
+function renderArtistChips() {
+    for (const [kind, key] of [['include', 'includedArtists'], ['exclude', 'excludedArtists']]) {
+        document.getElementById(`artist-${kind}-chips`).innerHTML = state[key].map(name => `
+            <button class="chip selected" data-artist="${escapeHtml(name)}" data-list="${key}"
+                    aria-label="Remove ${escapeHtml(name)}">
+                ${escapeHtml(name)} <span aria-hidden="true">&times;</span>
+            </button>
+        `).join('');
+    }
+}
+
+// Artist picker: suggestions come from the synced library; an artist is added once the
+// input exactly matches one (picked from the list, or typed and Enter pressed)
+function setupArtistFilter(kind, key) {
+    const input = document.getElementById(`artist-${kind}-input`);
+    const options = document.getElementById('artist-options');
+    let suggestions = [];
+    let debounce = null;
+
+    const addIfKnown = () => {
+        const match = suggestions.find(a => a.name.toLowerCase() === input.value.trim().toLowerCase());
+        if (!match) return false;
+        if (!state[key].includes(match.name)) {
+            state[key].push(match.name);
+            renderArtistChips();
+            updateFilterPreview();
+        }
+        input.value = '';
+        return true;
+    };
+
+    input.addEventListener('input', (e) => {
+        // Picking a suggestion isn't typing: Chrome sends no inputType, Firefox insertReplacementText
+        const picked = e.inputType === undefined || e.inputType === 'insertReplacementText';
+        if (picked && addIfKnown()) return;
+        clearTimeout(debounce);
+        debounce = setTimeout(async () => {
+            try {
+                suggestions = await fetchArtists(input.value.trim());
+            } catch {
+                suggestions = [];
+            }
+            options.innerHTML = suggestions.map(a =>
+                `<option value="${escapeHtml(a.name)}" label="${a.count} tracks"></option>`
+            ).join('');
+        }, 200);
+    });
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            addIfKnown();
+        }
+    });
+
+    document.getElementById(`artist-${kind}-chips`).addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-artist]');
+        if (!chip) return;
+        state[key] = state[key].filter(name => name !== chip.dataset.artist);
+        renderArtistChips();
+        updateFilterPreview();
+    });
+}
+
 function updateFilters() {
     // Remember which chip had focus so we can restore it after re-render
     const focused = document.activeElement;
@@ -1185,6 +1254,8 @@ function updateFilters() {
         decadeToggle.setAttribute('aria-label',
             allSelected ? 'Deselect all decades' : 'Select all decades');
     }
+
+    renderArtistChips();
 
     // Restore focus to the chip that was active before re-render
     if (focusedGenre) {
@@ -1379,6 +1450,8 @@ async function updateFilterPreview() {
         const requestBody = {
             genres: allGenresSelected() ? [] : state.selectedGenres,
             decades: allDecadesSelected() ? [] : state.selectedDecades,
+            artists: state.includedArtists,
+            exclude_artists: state.excludedArtists,
             track_count: state.trackCount,
             max_tracks_to_ai: state.maxTracksToAI,
             min_rating: state.minRating,
@@ -2329,6 +2402,8 @@ function resetPlaylistState() {
     state.additionalNotes = '';
     state.selectedGenres = [];
     state.selectedDecades = [];
+    state.includedArtists = [];
+    state.excludedArtists = [];
     state.playlist = [];
     state.playlistName = '';
     state.tokenCount = 0;
@@ -2731,6 +2806,9 @@ function setupEventListeners() {
     document.getElementById('continue-to-filters-btn').addEventListener('click', handleContinueToFilters);
 
     // Genre toggle all
+    setupArtistFilter('include', 'includedArtists');
+    setupArtistFilter('exclude', 'excludedArtists');
+
     document.getElementById('genre-toggle-all').addEventListener('click', () => {
         state.selectedGenres = allGenresSelected() ? [] : state.availableGenres.map(g => g.name);
         updateFilters();
@@ -3186,6 +3264,8 @@ async function handleContinueToFilters() {
         state.availableDecades = stats.decades;
         state.selectedGenres = stats.genres.map(g => g.name);
         state.selectedDecades = stats.decades.map(d => d.name);
+        state.includedArtists = [];
+        state.excludedArtists = [];
 
         state.step = 'filters';
         updateStep();
@@ -3203,6 +3283,8 @@ async function handleGenerate() {
     const request = {
         genres: allGenresSelected() ? [] : state.selectedGenres,
         decades: allDecadesSelected() ? [] : state.selectedDecades,
+        artists: state.includedArtists,
+        exclude_artists: state.excludedArtists,
         track_count: state.trackCount,
         exclude_live: state.excludeLive,
         min_rating: state.minRating,
@@ -4501,6 +4583,8 @@ async function handlePlaylistRefineNext() {
         state.availableDecades = response.available_decades;
         state.selectedGenres = response.suggested_genres;
         state.selectedDecades = response.suggested_decades;
+        state.includedArtists = response.suggested_artists || [];
+        state.excludedArtists = [];
     } else {
         // Fallback: fetch stats directly if analysis failed
         try {

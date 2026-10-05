@@ -421,3 +421,32 @@ class TestMediaServerSwitch:
         to_thread.assert_called_once()
         assert to_thread.call_args.args[0] is cache.replace_library
         assert to_thread.call_args.args[2] == cache.invalidate_cache.return_value
+
+
+class TestArtistEndpoints:
+    """Artist autocomplete and artist filters in the preview (#9)."""
+
+    def test_artists_empty_without_cache(self, client):
+        with patch("backend.main.library_cache.has_cached_tracks", return_value=False):
+            assert client.get("/api/library/artists?q=radio").json() == []
+
+    def test_artists_search(self, client):
+        with patch("backend.main.library_cache.has_cached_tracks", return_value=True), \
+             patch("backend.main.library_cache.search_artists",
+                   return_value=[{"name": "Radiohead", "count": 2}]) as search:
+            data = client.get("/api/library/artists?q=%20radio%20").json()
+
+        assert data == [{"name": "Radiohead", "count": 2}]
+        search.assert_called_once_with("radio")
+
+    def test_preview_passes_artist_filters(self, client):
+        with patch("backend.main.get_config", return_value=create_mock_config()), \
+             patch("backend.main.library_cache.has_cached_tracks", return_value=True), \
+             patch("backend.main.library_cache.count_tracks_by_filters", return_value=12) as count:
+            data = client.post("/api/filter/preview", json={
+                "genres": [], "decades": [], "artists": ["Radiohead"], "exclude_artists": ["Oasis"],
+            }).json()
+
+        assert data["matching_tracks"] == 12
+        assert count.call_args.kwargs["artists"] == ["Radiohead"]
+        assert count.call_args.kwargs["exclude_artists"] == ["Oasis"]

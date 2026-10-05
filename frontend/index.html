@@ -388,6 +388,19 @@
                         </div>
 
                         <div class="filter-section">
+                            <h3>Artists</h3>
+                            <label for="artist-include-input" class="artist-filter-label">Only these artists</label>
+                            <input type="text" id="artist-include-input" list="artist-options"
+                                   placeholder="Type an artist name" autocomplete="off">
+                            <div id="artist-include-chips" class="chip-container artist-chips" role="group" aria-label="Included artists"></div>
+                            <label for="artist-exclude-input" class="artist-filter-label">Exclude artists</label>
+                            <input type="text" id="artist-exclude-input" list="artist-options"
+                                   placeholder="Type an artist name" autocomplete="off">
+                            <div id="artist-exclude-chips" class="chip-container artist-chips" role="group" aria-label="Excluded artists"></div>
+                            <datalist id="artist-options"></datalist>
+                        </div>
+
+                        <div class="filter-section">
                             <h3>Playlist Size</h3>
                             <div class="track-count-selector" role="group" aria-label="Playlist size">
                                 <button class="count-btn" data-count="15" aria-pressed="false">15</button>

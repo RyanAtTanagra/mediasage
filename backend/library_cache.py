@@ -277,12 +277,49 @@ def get_cached_tracks() -> list[dict[str, Any]]:
         conn.close()
 
 
+def _artist_conditions(
+    artists: list[str] | None, exclude_artists: list[str] | None, params: list[Any]
+) -> list[str]:
+    """SQL conditions for the artist filters (case-insensitive), adding their params."""
+    conditions = []
+    for names, operator in ((artists, "IN"), (exclude_artists, "NOT IN")):
+        if names:
+            conditions.append(f"LOWER(artist) {operator} ({', '.join('?' for _ in names)})")
+            params.extend(name.lower() for name in names)
+    return conditions
+
+
+def search_artists(query: str = "", limit: int = 20) -> list[dict[str, Any]]:
+    """Artists in the cache whose name contains query, with track counts, most tracks first."""
+    conn = ensure_db_initialized()
+    try:
+        rows = conn.execute(
+            "SELECT artist AS name, COUNT(*) AS count FROM tracks "
+            "WHERE artist LIKE ? GROUP BY artist ORDER BY count DESC, artist LIMIT ?",
+            (f"%{query}%", limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_artist_names() -> list[str]:
+    """Every distinct artist name in the cache."""
+    conn = ensure_db_initialized()
+    try:
+        return [row[0] for row in conn.execute("SELECT DISTINCT artist FROM tracks")]
+    finally:
+        conn.close()
+
+
 def get_tracks_by_filters(
     genres: list[str] | None = None,
     decades: list[str] | None = None,
     min_rating: int = 0,
     exclude_live: bool = True,
     limit: int = 0,
+    artists: list[str] | None = None,
+    exclude_artists: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Get tracks from cache matching filter criteria.
 
@@ -292,6 +329,8 @@ def get_tracks_by_filters(
         min_rating: Minimum user rating (0-10, 0 = no filter)
         exclude_live: Whether to exclude live recordings
         limit: Max tracks to return (0 = no limit)
+        artists: Only tracks by these artists
+        exclude_artists: No tracks by these artists
 
     Returns:
         List of matching track dicts
@@ -321,6 +360,8 @@ def get_tracks_by_filters(
                 params.extend([start_year, end_year])
             if decade_conditions:
                 conditions.append(f"({' OR '.join(decade_conditions)})")
+
+        conditions.extend(_artist_conditions(artists, exclude_artists, params))
 
         # Build query
         where_clause = " AND ".join(conditions) if conditions else "1=1"
@@ -633,6 +674,8 @@ def count_tracks_by_filters(
     decades: list[str] | None = None,
     min_rating: int = 0,
     exclude_live: bool = True,
+    artists: list[str] | None = None,
+    exclude_artists: list[str] | None = None,
 ) -> int:
     """Count tracks matching filter criteria without fetching full data.
 
@@ -641,6 +684,8 @@ def count_tracks_by_filters(
         decades: List of decades like "1990s" (OR matching)
         min_rating: Minimum user rating (0-10, 0 = no filter)
         exclude_live: Whether to exclude live recordings
+        artists: Only tracks by these artists
+        exclude_artists: No tracks by these artists
 
     Returns:
         Count of matching tracks, or -1 if cache is empty
@@ -673,6 +718,8 @@ def count_tracks_by_filters(
                 params.extend([start_year, end_year])
             if decade_conditions:
                 conditions.append(f"({' OR '.join(decade_conditions)})")
+
+        conditions.extend(_artist_conditions(artists, exclude_artists, params))
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
 

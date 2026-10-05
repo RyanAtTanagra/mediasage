@@ -2,6 +2,7 @@
 
 import json
 import logging
+import random
 import time
 from collections.abc import Generator
 from datetime import datetime
@@ -119,13 +120,15 @@ def _get_tracks_from_cache_or_plex(
     exclude_live: bool,
     min_rating: int,
     max_tracks_to_ai: int,
+    artists: list[str] | None = None,
+    exclude_artists: list[str] | None = None,
 ) -> list[Track]:
-    """Get tracks from cache if available, otherwise from Plex.
+    """Get tracks from cache if available, otherwise from the media server.
 
     Returns:
         List of Track objects
     """
-    has_filters = genres or decades or min_rating > 0
+    has_filters = genres or decades or min_rating > 0 or artists or exclude_artists
     effective_limit = max_tracks_to_ai if max_tracks_to_ai > 0 else 2000
 
     # Try cache first
@@ -137,24 +140,37 @@ def _get_tracks_from_cache_or_plex(
             min_rating=min_rating,
             exclude_live=exclude_live,
             limit=effective_limit,
+            artists=artists,
+            exclude_artists=exclude_artists,
         )
         return [_cached_track_to_model(t) for t in cached_tracks]
 
-    # Fall back to Plex
-    logger.info("Cache empty, fetching from Plex")
+    logger.info("Cache empty, fetching from the media server")
     if not has_filters:
         return plex_client.get_random_tracks(
             count=effective_limit,
             exclude_live=exclude_live,
         )
-    else:
-        return plex_client.get_tracks_by_filters(
-            genres=genres,
-            decades=decades,
-            exclude_live=exclude_live,
-            min_rating=min_rating,
-            limit=effective_limit,
-        )
+
+    # The servers can't filter by artist, so fetch everything else that matches, then narrow
+    by_artist = artists or exclude_artists
+    tracks = plex_client.get_tracks_by_filters(
+        genres=genres,
+        decades=decades,
+        exclude_live=exclude_live,
+        min_rating=min_rating,
+        limit=0 if by_artist else effective_limit,
+    )
+    if by_artist:
+        include = {a.lower() for a in artists or []}
+        exclude = {a.lower() for a in exclude_artists or []}
+        tracks = [
+            t for t in tracks
+            if (not include or t.artist.lower() in include) and t.artist.lower() not in exclude
+        ]
+        if len(tracks) > effective_limit:
+            tracks = random.sample(tracks, effective_limit)
+    return tracks
 
 
 def generate_playlist_stream(
@@ -169,6 +185,8 @@ def generate_playlist_stream(
     exclude_live: bool = True,
     min_rating: int = 0,
     max_tracks_to_ai: int = 500,
+    artists: list[str] | None = None,
+    exclude_artists: list[str] | None = None,
 ) -> Generator[str, None, None]:
     """Generate a playlist with streaming progress updates.
 
@@ -189,7 +207,7 @@ def generate_playlist_stream(
             yield emit("error", {"message": "Media server not connected"})
             return
 
-        has_filters = genres or decades or min_rating > 0
+        has_filters = genres or decades or min_rating > 0 or artists or exclude_artists
 
         # Step 1: Fetch tracks from cache or Plex
         using_cache = library_cache.has_cached_tracks()
@@ -210,6 +228,8 @@ def generate_playlist_stream(
                 exclude_live=exclude_live,
                 min_rating=min_rating,
                 max_tracks_to_ai=max_tracks_to_ai,
+                artists=artists,
+                exclude_artists=exclude_artists,
             )
         except PlexQueryError as e:
             yield emit("error", {"message": f"Plex server error: {e}"})
@@ -248,6 +268,11 @@ def generate_playlist_stream(
             )
             if selected_dimensions:
                 generation_parts.append(f"Explore these dimensions: {', '.join(selected_dimensions)}")
+
+        if artists:
+            generation_parts.append(
+                f"The user asked for these artists, so every track is by them: {', '.join(artists)}"
+            )
 
         if additional_notes:
             generation_parts.append(f"Additional notes: {additional_notes}")
@@ -416,7 +441,7 @@ Your task is to select tracks that best match the user's request. For each track
 
 Guidelines:
 - Select tracks that fit the mood, era, style, and other aspects of the request
-- Vary the selection - don't pick too many tracks from the same artist or album
+- Vary the selection - don't pick too many tracks from the same album, or from the same artist unless the user asked for specific artists
 - Consider the flow of the playlist - how tracks will sound in sequence
 - If using a seed track, don't include the seed track itself in the results
 

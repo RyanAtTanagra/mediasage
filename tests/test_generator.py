@@ -472,3 +472,65 @@ class TestLiveVersionFiltering:
         assert is_live_version(MockTrack("Song", "2023-05-15 Show")) is True
         assert is_live_version(MockTrack("Song", "1999/12/31 New Years")) is True
         assert is_live_version(MockTrack("Song", "Regular Album 2023")) is False
+
+
+class TestArtistFilter:
+    """Artist filters reach the track source and the AI instructions (#9, #18)."""
+
+    def _track(self, key, artist):
+        from backend.models import Track
+        return Track(rating_key=key, title=f"Song {key}", artist=artist, album="A", duration_ms=1)
+
+    def test_fallback_without_cache_filters_by_artist(self, monkeypatch):
+        from backend.generator import _get_tracks_from_cache_or_plex
+
+        monkeypatch.setattr("backend.generator.library_cache.has_cached_tracks", lambda: False)
+        client = MagicMock()
+        client.get_tracks_by_filters.return_value = [
+            self._track("1", "Radiohead"), self._track("2", "Oasis"), self._track("3", "radiohead"),
+        ]
+
+        tracks = _get_tracks_from_cache_or_plex(
+            client, genres=None, decades=None, exclude_live=True, min_rating=0,
+            max_tracks_to_ai=500, artists=["Radiohead"],
+        )
+
+        assert [t.rating_key for t in tracks] == ["1", "3"]
+        assert client.get_tracks_by_filters.call_args.kwargs["limit"] == 0  # fetch all, then narrow
+
+    def test_cache_path_passes_artist_filters(self, monkeypatch):
+        from backend.generator import _get_tracks_from_cache_or_plex
+
+        monkeypatch.setattr("backend.generator.library_cache.has_cached_tracks", lambda: True)
+        get = MagicMock(return_value=[])
+        monkeypatch.setattr("backend.generator.library_cache.get_tracks_by_filters", get)
+
+        _get_tracks_from_cache_or_plex(
+            MagicMock(), genres=None, decades=None, exclude_live=True, min_rating=0,
+            max_tracks_to_ai=500, artists=["Radiohead"], exclude_artists=["Oasis"],
+        )
+
+        assert get.call_args.kwargs["artists"] == ["Radiohead"]
+        assert get.call_args.kwargs["exclude_artists"] == ["Oasis"]
+
+    def test_generation_prompt_names_requested_artists(self, monkeypatch):
+        from backend import generator
+        from backend.llm_client import LLMResponse
+
+        monkeypatch.setattr(generator, "NARRATIVE_RETRY_DELAY", 0)
+        monkeypatch.setattr(generator, "_get_tracks_from_cache_or_plex",
+                            lambda *a, **k: [self._track("1", "Radiohead")])
+        monkeypatch.setattr(generator.library_cache, "has_cached_tracks", lambda: True)
+        llm = MagicMock()
+        llm.generate.return_value = LLMResponse(content="[]", input_tokens=1, output_tokens=1, model="m")
+        llm.parse_json_response.return_value = []
+        monkeypatch.setattr(generator, "get_llm_client", lambda: llm)
+        monkeypatch.setattr(generator, "get_current_media_client", lambda: MagicMock())
+
+        list(generator.generate_playlist_stream(prompt="a Radiohead playlist", genres=[], decades=[],
+                                                artists=["Radiohead"]))
+
+        prompt = llm.generate.call_args.args[0]
+        assert "these artists, so every track is by them: Radiohead" in prompt
+        system = llm.generate.call_args.args[1]
+        assert "unless the user asked for specific artists" in system

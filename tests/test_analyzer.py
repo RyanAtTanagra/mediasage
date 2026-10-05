@@ -33,6 +33,33 @@ class TestPromptAnalysis:
 
         assert result.suggested_genres == ["Jazz"]
 
+    def test_suggests_named_artists_in_library(self, monkeypatch):
+        """'A Radiohead playlist' pre-fills the artist filter with library spellings (#18)."""
+        from backend.analyzer import analyze_prompt
+
+        monkeypatch.setattr("backend.analyzer.library_cache.has_cached_tracks", lambda: True)
+        monkeypatch.setattr("backend.analyzer.library_cache.get_cached_genre_decade_stats",
+                            lambda: {"genres": [], "decades": []})
+        monkeypatch.setattr("backend.analyzer.library_cache.get_artist_names",
+                            lambda: ["Radiohead", "The Beatles", "Sigur Rós"])
+        reply = {"genres": [], "decades": [], "artists": ["radiohead", "Beatles", "Sigur Ros", "Taylor Swift"]}
+        with patch("backend.analyzer.get_llm_client", return_value=self._llm(reply)), \
+             patch("backend.analyzer.get_current_media_client", return_value=MagicMock()):
+            result = analyze_prompt("Radiohead, the Beatles and Sigur Ros")
+
+        assert result.suggested_artists == ["Radiohead", "The Beatles", "Sigur Rós"]
+
+    def test_no_artist_suggestions_without_cache(self):
+        from backend.analyzer import analyze_prompt
+
+        media_client = MagicMock()
+        media_client.get_library_stats.return_value = {"genres": [], "decades": []}
+        with patch("backend.analyzer.get_llm_client", return_value=self._llm({"artists": ["Radiohead"]})), \
+             patch("backend.analyzer.get_current_media_client", return_value=media_client):
+            result = analyze_prompt("a Radiohead playlist")
+
+        assert result.suggested_artists == []
+
     def test_uses_cached_genres_when_synced(self, monkeypatch):
         from backend.analyzer import analyze_prompt
 

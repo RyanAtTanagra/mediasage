@@ -682,6 +682,22 @@ textarea {
     opacity: 0.8;
 }
 
+/* Artist filter */
+.artist-filter-label {
+    display: block;
+    margin-bottom: var(--spacing-xs);
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+}
+
+.artist-chips {
+    margin-top: var(--spacing-sm);
+}
+
+.artist-chips:empty {
+    margin: 0 0 var(--spacing-md);
+}
+
 /* Track Count Selector */
 .track-count-selector {
     display: flex;
