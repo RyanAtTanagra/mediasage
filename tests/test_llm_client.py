@@ -299,6 +299,32 @@ class TestOllamaProvider:
             call_args = mock_client_instance.post.call_args
             assert "/api/generate" in call_args[0][0]
 
+    def _ollama_call(self, response_text, context_window=40960):
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(
+            provider="ollama", model_analysis="qwen3:8b", model_generation="qwen3:8b",
+            ollama_context_window=context_window,
+        )
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"response": response_text, "prompt_eval_count": 1, "eval_count": 1}
+        with patch("backend.llm_client.httpx.Client") as mock_httpx:
+            http = mock_httpx.return_value.__enter__.return_value
+            http.post.return_value = mock_response
+            result = LLMClient(config)._complete_ollama("prompt", "system", "qwen3:8b")
+        return result, http.post.call_args.kwargs["json"]
+
+    def test_ollama_sends_context_window(self):
+        """Without num_ctx Ollama truncates prompts sized for the full context (#24)."""
+        _, body = self._ollama_call("[]", context_window=40960)
+        assert body["options"] == {"num_ctx": 40960}
+
+    def test_ollama_strips_inline_thinking(self):
+        """Older Ollama versions return a reasoning model's thinking inline."""
+        result, _ = self._ollama_call('<think>\nPicking tracks...\n</think>\n[{"title": "A"}]')
+        assert result.content == '[{"title": "A"}]'
+
     def test_complete_dispatch_routes_to_ollama(self, mocker):
         """Should route 'ollama' provider to _complete_ollama method."""
         from backend.llm_client import LLMClient

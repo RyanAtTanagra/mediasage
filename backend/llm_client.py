@@ -243,6 +243,9 @@ class LLMClient:
                     "prompt": prompt,
                     "system": system,
                     "stream": False,
+                    # Ollama otherwise uses its small default context and silently drops the
+                    # start of prompts sized for the model's full context window
+                    "options": {"num_ctx": self.config.ollama_context_window},
                 },
             )
             response.raise_for_status()
@@ -250,7 +253,8 @@ class LLMClient:
 
         logger.debug("Ollama response received")
 
-        content = data.get("response", "")
+        # Older Ollama versions put reasoning models' thinking inline
+        content = re.sub(r"<think>.*?</think>", "", data.get("response", ""), flags=re.DOTALL).strip()
         # Ollama returns token counts in the response
         # prompt_eval_count is input tokens, eval_count is output tokens
         input_tokens = data.get("prompt_eval_count", 0)
