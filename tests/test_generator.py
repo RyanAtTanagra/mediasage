@@ -3,6 +3,8 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _parse_sse_events(generator):
     """Parse SSE events from generate_playlist_stream into (event, data) tuples."""
@@ -179,6 +181,10 @@ class TestTrackMatching:
 class TestNarrativeGeneration:
     """Tests for curator narrative generation."""
 
+    @pytest.fixture(autouse=True)
+    def no_retry_delay(self, monkeypatch):
+        monkeypatch.setattr("backend.generator.NARRATIVE_RETRY_DELAY", 0)
+
     def test_generate_narrative_returns_title_and_narrative(self, mocker):
         """Should generate creative title and narrative from track selections."""
         from backend.generator import generate_narrative
@@ -217,13 +223,62 @@ class TestNarrativeGeneration:
         track_selections = [{"artist": "Test", "title": "Song", "reason": "Test"}]
 
         mock_client = MagicMock()
-        mock_client.generate.side_effect = Exception("LLM error")
+        mock_client.analyze.side_effect = Exception("LLM error")
 
         title, narrative = generate_narrative(track_selections, mock_client)
 
         # Should return fallback title with date
         assert "Playlist" in title
         assert narrative == ""
+        assert mock_client.analyze.call_count == 2  # retried once
+
+    def test_generate_narrative_retries_transient_failure(self):
+        """A rate limit or timeout on the first try shouldn't leave a generic title (#14)."""
+        from backend.generator import generate_narrative
+
+        mock_client = MagicMock()
+        mock_client.analyze.side_effect = [RuntimeError("Error code: 429"), MagicMock()]
+        mock_client.parse_json_response.return_value = {"title": "Velvet Midnight", "narrative": "Smoky."}
+
+        title, narrative = generate_narrative([{"artist": "A", "title": "B"}], mock_client)
+
+        assert title.startswith("Velvet Midnight - ")
+        assert narrative == "Smoky."
+
+    def test_generate_narrative_accepts_key_variants(self):
+        from backend.generator import generate_narrative
+
+        for reply in (
+            {"Title": "Velvet Midnight", "Narrative": "Smoky."},
+            {"name": "Velvet Midnight", "description": "Smoky."},
+            {"playlist_title": "Velvet Midnight", "story": "Smoky."},
+        ):
+            mock_client = MagicMock()
+            mock_client.parse_json_response.return_value = reply
+            title, narrative = generate_narrative([{"artist": "A", "title": "B"}], mock_client)
+            assert title.startswith("Velvet Midnight - "), reply
+            assert narrative == "Smoky.", reply
+
+    def test_generate_narrative_falls_back_to_request(self):
+        """When the AI title can't be had, name the playlist after the request."""
+        from backend.generator import generate_narrative
+
+        mock_client = MagicMock()
+        mock_client.analyze.side_effect = TimeoutError("timed out")
+
+        title, narrative = generate_narrative(
+            [{"artist": "A", "title": "B"}], mock_client, "late night mellow jazz"
+        )
+
+        assert title.startswith("Late Night Mellow Jazz - ")
+        assert narrative == ""
+
+    def test_fallback_title_is_kept_short(self):
+        from backend.generator import _fallback_title
+
+        title = _fallback_title("upbeat instrumental jazz for a long dinner party with old friends tonight")
+        assert len(title) <= 40
+        assert title == "Upbeat Instrumental Jazz For A Long"
 
     def test_generate_narrative_passes_through_long_narrative(self, mocker):
         """Should pass through narrative without truncation (LLM prompt guides length)."""

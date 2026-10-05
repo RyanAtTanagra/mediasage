@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from collections.abc import Generator
 from datetime import datetime
 
@@ -12,6 +13,31 @@ from backend.config import get_current_media_client
 from backend import library_cache
 
 logger = logging.getLogger(__name__)
+
+
+NARRATIVE_ATTEMPTS = 2
+NARRATIVE_RETRY_DELAY = 2.0  # seconds; a second request right after generation can hit rate limits
+
+
+def _get_ci(result: dict, *keys: str) -> str:
+    """First non-empty string value among keys, matching keys case-insensitively."""
+    lowered = {str(k).lower(): v for k, v in result.items()}
+    for key in keys:
+        value = lowered.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _fallback_title(user_request: str) -> str:
+    """Name the playlist after the request when the AI title isn't available."""
+    words = user_request.split()
+    title = ""
+    for word in words:
+        if len(title) + len(word) > 40:
+            break
+        title = f"{title} {word}".strip()
+    return title.title() if title else "Playlist"
 
 
 def generate_narrative(
@@ -27,8 +53,8 @@ def generate_narrative(
         user_request: Original user prompt/request for context
 
     Returns:
-        Tuple of (playlist_title with date, narrative)
-        On failure, returns ("{Mon YYYY} Playlist", "")
+        Tuple of (playlist_title with date, narrative). If the AI call keeps failing,
+        the title is based on user_request and the narrative is empty.
     """
     # Build input for Query 2: track list with reasons
     tracks_with_reasons = "\n".join(
@@ -42,49 +68,34 @@ def generate_narrative(
     else:
         narrative_prompt = f"Selected tracks:\n{tracks_with_reasons}"
 
-    # Get current month/year for title suffix
     date_suffix = datetime.now().strftime("%b %Y")
-    fallback_title = f"{date_suffix} Playlist"
 
-    try:
-        # Use analysis model for better creative writing quality
-        response = llm_client.analyze(narrative_prompt, NARRATIVE_SYSTEM)
-        result = llm_client.parse_json_response(response)
+    for attempt in range(1, NARRATIVE_ATTEMPTS + 1):
+        try:
+            # Use analysis model for better creative writing quality
+            response = llm_client.analyze(narrative_prompt, NARRATIVE_SYSTEM)
+            result = llm_client.parse_json_response(response)
 
-        # Handle array-wrapped responses (some LLMs wrap in [])
-        if isinstance(result, list) and len(result) > 0:
-            result = result[0]
+            # Handle array-wrapped responses (some LLMs wrap in [])
+            if isinstance(result, list) and result:
+                result = result[0]
+            if not isinstance(result, dict):
+                raise ValueError(f"expected a JSON object, got {type(result).__name__}")
 
-        if not isinstance(result, dict):
-            logger.warning("Narrative response not a dict: %s", type(result).__name__)
-            return fallback_title, ""
+            raw_title = _get_ci(result, "title", "name", "playlist_title", "playlist_name")
+            narrative = _get_ci(result, "narrative", "description", "text", "content", "story")
+            if not raw_title:
+                raise ValueError(f"no title in response (keys: {list(result.keys())})")
+            if not narrative:
+                logger.warning("Narrative missing from response. Keys: %s", list(result.keys()))
+            return f"{raw_title} - {date_suffix}", narrative
 
-        raw_title = result.get("title", "").strip()
+        except Exception as e:
+            logger.warning("Narrative generation failed (attempt %d of %d): %s", attempt, NARRATIVE_ATTEMPTS, e)
+            if attempt < NARRATIVE_ATTEMPTS:
+                time.sleep(NARRATIVE_RETRY_DELAY)
 
-        # Try common alternate keys for narrative
-        narrative = (
-            result.get("narrative")
-            or result.get("description")
-            or result.get("text")
-            or result.get("content")
-            or ""
-        ).strip()
-
-        # Log if we got title but no narrative (helps debug)
-        if raw_title and not narrative:
-            logger.warning("Narrative missing from response. Keys: %s", list(result.keys()))
-
-        # Append date to title
-        if raw_title:
-            playlist_title = f"{raw_title} - {date_suffix}"
-        else:
-            playlist_title = fallback_title
-
-        return playlist_title, narrative
-
-    except Exception as e:
-        logger.warning("Narrative generation failed: %s", e)
-        return fallback_title, ""
+    return f"{_fallback_title(user_request)} - {date_suffix}", ""
 
 
 def _cached_track_to_model(cached: dict) -> Track:
@@ -298,7 +309,8 @@ def generate_playlist_stream(
         # Step 7: Generate narrative
         yield emit("progress", {"step": "narrative", "message": "Writing playlist narrative..."})
 
-        playlist_title, narrative = generate_narrative(track_selections, llm_client, prompt or "")
+        user_request = prompt or (f"Inspired by {seed_track.title}" if seed_track else "")
+        playlist_title, narrative = generate_narrative(track_selections, llm_client, user_request)
         logger.info("Generated narrative: title='%s', narrative_len=%d", playlist_title, len(narrative))
 
         # Emit narrative event for frontend
