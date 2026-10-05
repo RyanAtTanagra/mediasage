@@ -370,6 +370,31 @@ class TestOllamaProvider:
             LLMClient(config("gemini"))
         assert mock_genai.Client.call_args.kwargs["http_options"].timeout == 900_000
 
+    def test_local_responses_cost_nothing(self):
+        """Ollama and custom endpoints showed the placeholder price for unknown models."""
+        from backend.llm_client import LLMClient, LLMResponse
+        from backend.models import LLMConfig
+
+        reply = LLMResponse(content="[]", input_tokens=100_000, output_tokens=10_000, model="qwen3:8b")
+        for provider in ("ollama", "custom"):
+            config = LLMConfig(provider=provider, model_analysis="qwen3:8b", model_generation="qwen3:8b")
+            client = LLMClient(config)
+            method = "_complete_ollama" if provider == "ollama" else "_complete_openai"
+            with patch.object(client, method, return_value=reply):
+                assert client.generate("prompt", "system").estimated_cost() == 0.0, provider
+
+    def test_cloud_responses_still_priced(self):
+        from backend.llm_client import LLMClient, LLMResponse
+        from backend.models import LLMConfig
+
+        config = LLMConfig(provider="gemini", api_key="k", model_analysis="gemini-3.5-flash-lite",
+                           model_generation="gemini-3.5-flash-lite")
+        reply = LLMResponse(content="[]", input_tokens=1_000_000, output_tokens=0, model="gemini-3.5-flash-lite")
+        with patch("backend.llm_client.genai"):
+            client = LLMClient(config)
+        with patch.object(client, "_complete_gemini", return_value=reply):
+            assert client.generate("prompt", "system").estimated_cost() == 0.30
+
     def test_ollama_sends_context_window(self):
         """Without num_ctx Ollama truncates prompts sized for the full context (#24)."""
         _, body = self._ollama_call("[]", context_window=40960)

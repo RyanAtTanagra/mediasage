@@ -36,6 +36,7 @@ class LLMResponse:
     input_tokens: int
     output_tokens: int
     model: str
+    local: bool = False  # Ollama or a custom endpoint: no per-token cost
 
     @property
     def total_tokens(self) -> int:
@@ -44,6 +45,8 @@ class LLMResponse:
 
     def estimated_cost(self) -> float:
         """Estimate cost in USD based on token usage."""
+        if self.local:
+            return 0.0
         return estimate_cost_for_model(self.model, self.input_tokens, self.output_tokens)
 
 
@@ -296,7 +299,7 @@ class LLMClient:
             raise RuntimeError("No AI model is set. Choose one in Settings.")
 
         try:
-            return complete(prompt, system, model)
+            response = complete(prompt, system, model)
         except _TIMEOUT_ERRORS as e:
             seconds = self.config.request_timeout
             waited = f"{seconds} seconds" if seconds < 120 else f"{seconds / 60:g} minutes"
@@ -304,6 +307,8 @@ class LLMClient:
                 f"The AI didn't respond within {waited}. Raise Request Timeout in "
                 "Settings, or send fewer tracks to the AI."
             ) from e
+        response.local = self.provider in ("ollama", "custom")
+        return response
 
     def analyze(self, prompt: str, system: str) -> LLMResponse:
         """Use the analysis model for understanding tasks.
