@@ -1834,6 +1834,7 @@ function updateSettings() {
     customModel.value = state.config.model_analysis || '';  // Custom uses same model for both
     customContext.value = state.config.custom_context_window || 32768;
     document.getElementById('llm-request-timeout').value = Math.round((state.config.request_timeout || 600) / 60);
+    setLibrarySyncSelect(state.config.library_sync_hours ?? 24);
 
     // Update status indicators
     // plex_connected reports whichever server is active; the other one's fields are hidden
@@ -1877,7 +1878,17 @@ const ENV_OVERRIDABLE_INPUTS = {
     ollama_url: ['ollama-url'],
     custom_url: ['custom-url'],
     request_timeout: ['llm-request-timeout'],
+    library_sync_hours: ['library-sync-hours'],
 };
+
+// Selects the matching option, adding one for an interval set in YAML or LIBRARY_SYNC_HOURS
+function setLibrarySyncSelect(hours) {
+    const select = document.getElementById('library-sync-hours');
+    if (![...select.options].some(o => parseFloat(o.value) === hours)) {
+        select.add(new Option(`Every ${hours} hours`, String(hours)));
+    }
+    select.value = [...select.options].find(o => parseFloat(o.value) === hours).value;
+}
 
 function applyEnvOverrides() {
     const overrides = state.config.env_overrides || {};
@@ -3529,6 +3540,8 @@ async function handleSaveSettings() {
         if (cloudModelAnalysis) updates.model_analysis = cloudModelAnalysis;
         if (cloudModelGeneration) updates.model_generation = cloudModelGeneration;
     }
+
+    updates.library_sync_hours = parseFloat(document.getElementById('library-sync-hours').value);
 
     const timeoutMinutes = parseInt(document.getElementById('llm-request-timeout').value);
     if (timeoutMinutes > 0) updates.request_timeout = timeoutMinutes * 60;

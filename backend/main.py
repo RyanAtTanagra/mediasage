@@ -145,10 +145,15 @@ async def lifespan(app: FastAPI):
         if library_cache.needs_resync() or (server_id and library_cache.check_server_changed(server_id)):
             logger.info("Library cache is out of date — starting automatic re-sync")
             asyncio.create_task(asyncio.to_thread(library_cache.sync_library, media_client))
+        else:
+            _sync_if_stale()
+
+    freshness_task = asyncio.create_task(_keep_library_fresh())
 
     yield
 
     # Shutdown: clean up resources
+    freshness_task.cancel()
     if _music_research_client is not None:
         await _music_research_client.close()
     if _art_proxy_client is not None:
@@ -166,6 +171,29 @@ app = FastAPI(
 # =============================================================================
 # Config Helpers
 # =============================================================================
+
+
+LIBRARY_CHECK_INTERVAL = 3600  # seconds between staleness checks
+
+
+def _sync_if_stale() -> None:
+    """Start a background sync once the cache is older than the auto-refresh setting (0 = off)."""
+    max_age_hours = get_config().library_sync_hours
+    if max_age_hours <= 0 or library_cache.get_sync_progress()["is_syncing"]:
+        return
+    media_client = get_current_media_client()
+    if media_client and media_client.is_connected() and library_cache.is_cache_stale(max_age_hours):
+        logger.info("Library cache is more than %g hours old — syncing", max_age_hours)
+        asyncio.create_task(asyncio.to_thread(library_cache.sync_library, media_client))
+
+
+async def _keep_library_fresh() -> None:
+    while True:
+        await asyncio.sleep(LIBRARY_CHECK_INTERVAL)
+        try:
+            _sync_if_stale()
+        except Exception:
+            logger.exception("Library freshness check failed")
 
 
 def _resync_for_new_media_server() -> None:
@@ -224,6 +252,7 @@ def _build_config_response(config, media_client) -> ConfigResponse:
         custom_url=config.llm.custom_url,
         custom_context_window=config.llm.custom_context_window,
         request_timeout=config.llm.request_timeout,
+        library_sync_hours=config.library_sync_hours,
         is_local_provider=is_local,
         env_overrides=env_overrides(config.llm.provider),
         long_context_threshold=gen_entry.long_context_threshold if gen_entry else None,

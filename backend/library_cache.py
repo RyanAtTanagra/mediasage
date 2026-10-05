@@ -416,7 +416,7 @@ def clear_cache() -> None:
         conn.close()
 
 
-def is_cache_stale(max_age_hours: int = 24) -> bool:
+def is_cache_stale(max_age_hours: float = 24) -> bool:
     """Check if cache is older than max_age_hours.
 
     Args:

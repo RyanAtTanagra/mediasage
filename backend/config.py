@@ -152,6 +152,7 @@ _ENV_OVERRIDABLE = {
     "ollama_url": "OLLAMA_URL",
     "custom_url": "CUSTOM_LLM_URL",
     "request_timeout": "LLM_TIMEOUT",
+    "library_sync_hours": "LIBRARY_SYNC_HOURS",
 }
 
 _API_KEY_ENV = {
@@ -337,6 +338,9 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         jellyfin=jellyfin_config,
         llm=llm_config,
         defaults=defaults_config,
+        library_sync_hours=float(
+            get_env_or_yaml("LIBRARY_SYNC_HOURS", yaml_config.get("library_sync_hours"), 24)
+        ),
     )
 
 
@@ -436,18 +440,22 @@ def update_config_values(updates: dict[str, Any]) -> AppConfig:
     new_jellyfin = _config.jellyfin.model_copy(update=jellyfin_updates)
     new_llm = _config.llm.model_copy(update=llm_updates)
 
+    library_sync_hours = updates.get("library_sync_hours")  # 0 (off) is a real value
     _config = AppConfig(
         media_server=media_server or _config.media_server,
         plex=new_plex,
         jellyfin=new_jellyfin,
         llm=new_llm,
         defaults=_config.defaults,
+        library_sync_hours=_config.library_sync_hours if library_sync_hours is None else library_sync_hours,
     )
 
     # Persist to user config file
     user_updates: dict[str, Any] = {}
     if media_server:
         user_updates["media_server"] = media_server
+    if library_sync_hours is not None:
+        user_updates["library_sync_hours"] = library_sync_hours
     if plex_updates:
         user_updates["plex"] = plex_updates
     if jellyfin_updates:

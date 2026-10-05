@@ -149,6 +149,7 @@ class AppConfig(BaseModel):
     jellyfin: JellyfinConfig = JellyfinConfig()
     llm: LLMConfig
     defaults: DefaultsConfig = DefaultsConfig()
+    library_sync_hours: float = Field(24, ge=0)  # Re-sync the cache once it's this old; 0 = never
 
 
 # =============================================================================
@@ -463,6 +464,7 @@ class ConfigResponse(BaseModel):
     custom_url: str = ""
     custom_context_window: int = 32768
     request_timeout: int = 600
+    library_sync_hours: float = 24
     is_local_provider: bool = False
     # Settings fields set by environment variables (which override Settings), e.g. {"plex_url": "PLEX_URL"}
     env_overrides: dict[str, str] = {}
@@ -493,6 +495,7 @@ class UpdateConfigRequest(BaseModel):
     custom_url: str | None = None
     custom_context_window: int | None = None
     request_timeout: int | None = None
+    library_sync_hours: float | None = Field(None, ge=0)
 
 
 class HealthResponse(BaseModel):

@@ -450,3 +450,43 @@ class TestArtistEndpoints:
         assert data["matching_tracks"] == 12
         assert count.call_args.kwargs["artists"] == ["Radiohead"]
         assert count.call_args.kwargs["exclude_artists"] == ["Oasis"]
+
+
+class TestLibraryFreshness:
+    """The library cache re-syncs once it's older than the auto-refresh setting (default 24 hours)."""
+
+    def _run(self, *, stale=True, connected=True, syncing=False, hours=24.0):
+        from backend.main import _sync_if_stale
+
+        config = create_mock_config()
+        config.library_sync_hours = hours
+        media_client = MagicMock(is_connected=MagicMock(return_value=connected))
+        with patch("backend.main.get_config", return_value=config), \
+             patch("backend.main.library_cache") as cache, \
+             patch("backend.main.get_current_media_client", return_value=media_client), \
+             patch("backend.main.asyncio.to_thread", new=MagicMock()) as to_thread, \
+             patch("backend.main.asyncio.create_task"):
+            cache.get_sync_progress.return_value = {"is_syncing": syncing}
+            cache.is_cache_stale.return_value = stale
+            _sync_if_stale()
+        return cache, to_thread
+
+    def test_syncs_stale_cache(self):
+        cache, to_thread = self._run()
+        cache.is_cache_stale.assert_called_once_with(24.0)
+        assert to_thread.call_args.args[0] is cache.sync_library
+
+    def test_leaves_fresh_cache(self):
+        _, to_thread = self._run(stale=False)
+        to_thread.assert_not_called()
+
+    def test_skips_when_disconnected_or_already_syncing(self):
+        assert not self._run(connected=False)[1].called
+        assert not self._run(syncing=True)[1].called
+
+    def test_custom_interval_and_off(self):
+        cache, _ = self._run(hours=168.0)
+        cache.is_cache_stale.assert_called_once_with(168.0)
+        cache, to_thread = self._run(hours=0)
+        cache.is_cache_stale.assert_not_called()
+        to_thread.assert_not_called()

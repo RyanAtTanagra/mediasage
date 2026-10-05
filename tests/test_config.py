@@ -695,3 +695,38 @@ class TestCustomModel:
         monkeypatch.setenv("CUSTOM_LLM_MODEL", "gpt-4o-mini")
         assert env_overrides("custom")["model_analysis"] == "CUSTOM_LLM_MODEL"
         assert "model_analysis" not in env_overrides("gemini")
+
+
+class TestLibrarySyncHours:
+    """Auto-refresh interval: Settings/YAML, overridden by LIBRARY_SYNC_HOURS."""
+
+    def _load(self, tmp_path, monkeypatch, saved=None, env=None):
+        monkeypatch.delenv("LIBRARY_SYNC_HOURS", raising=False)
+        if env is not None:
+            monkeypatch.setenv("LIBRARY_SYNC_HOURS", env)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+        user = {} if saved is None else {"library_sync_hours": saved}
+        with patch("backend.config.load_user_yaml_config", return_value=user):
+            return load_config(config_file).library_sync_hours
+
+    def test_default_daily(self, tmp_path, monkeypatch):
+        assert self._load(tmp_path, monkeypatch) == 24
+
+    def test_saved_setting_and_env_override(self, tmp_path, monkeypatch):
+        assert self._load(tmp_path, monkeypatch, saved=168) == 168
+        assert self._load(tmp_path, monkeypatch, saved=168, env="6") == 6
+
+    def test_saving_off_is_kept(self, monkeypatch):
+        current = config_module.AppConfig(
+            plex=config_module.PlexConfig(url="", token=""),
+            llm=config_module.LLMConfig(provider="gemini", model_analysis="m", model_generation="m"),
+        )
+        monkeypatch.setattr(config_module, "_config", current)
+        saved = {}
+        monkeypatch.setattr(config_module, "save_user_config", saved.update)
+
+        config = config_module.update_config_values({"library_sync_hours": 0})
+
+        assert config.library_sync_hours == 0
+        assert saved["library_sync_hours"] == 0

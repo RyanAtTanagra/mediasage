@@ -118,7 +118,8 @@ MediaSage syncs your music library to a local SQLite database. After a one-time 
 
 - **Setup wizard** walks you through first-run configuration and sync
 - **Footer status** shows track count and last sync time
-- **Manual refresh** available anytime; refresh after adding music
+- **Auto-refresh** re-syncs once the cache is older than the interval in Settings (daily by default; every 6 or 12 hours, weekly, or off)
+- **Manual refresh** available anytime, e.g. right after adding music
 - **Switching servers** between Plex and Jellyfin re-syncs automatically
 
 ### Multi-Provider Support
@@ -332,6 +333,7 @@ Environment variables are optional, for scripted or automated installs. A variab
 | `LLM_PROVIDER` | Force provider: `gemini`, `anthropic`, `openai`, `ollama`, `custom` |
 | `LLM_MODEL_ANALYSIS` / `LLM_MODEL_GENERATION` | Force the analysis or generation model |
 | `LLM_TIMEOUT` | Seconds to wait for an AI response (default: 600). Also in Settings as Request Timeout |
+| `LIBRARY_SYNC_HOURS` | Re-sync the library cache once it's this many hours old (default: 24; `0` turns automatic re-syncs off). Also in Settings as Auto-Refresh Library |
 | `OLLAMA_URL` | Ollama server URL (default: `http://localhost:11434`) |
 | `OLLAMA_CONTEXT_WINDOW` | Override detected context window for Ollama (default: 32768) |
 | `CUSTOM_LLM_URL` | Custom OpenAI-compatible API base URL |
