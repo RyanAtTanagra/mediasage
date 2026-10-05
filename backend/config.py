@@ -377,6 +377,7 @@ def update_config_values(updates: dict[str, Any]) -> AppConfig:
     plex_updates = {}
     jellyfin_updates = {}
     llm_updates = {}
+    env_api_key = None
     media_server = updates.get("media_server")
 
     if "plex_url" in updates and updates["plex_url"]:
@@ -397,15 +398,11 @@ def update_config_values(updates: dict[str, Any]) -> AppConfig:
         new_provider = updates["llm_provider"]
         llm_updates["provider"] = new_provider
 
-        # Auto-select API key from environment if provider changed and no key provided
-        if not updates.get("llm_api_key"):
-            env_keys = {
-                "anthropic": os.environ.get("ANTHROPIC_API_KEY", ""),
-                "openai": os.environ.get("OPENAI_API_KEY", ""),
-                "gemini": os.environ.get("GEMINI_API_KEY", ""),
-            }
-            if env_keys.get(new_provider):
-                llm_updates["api_key"] = env_keys[new_provider]
+        # Use the new provider's key from the environment if none was entered. It's applied
+        # in memory only: the environment supplies it on every start, so it's never saved.
+        key_var = _API_KEY_ENV.get(new_provider)
+        if not updates.get("llm_api_key") and key_var and os.environ.get(key_var):
+            env_api_key = os.environ[key_var]
 
         # Default models only on an actual provider change, so re-saving the same
         # provider (Settings, setup wizard) keeps models the user picked
@@ -439,6 +436,8 @@ def update_config_values(updates: dict[str, Any]) -> AppConfig:
     new_plex = _config.plex.model_copy(update=plex_updates)
     new_jellyfin = _config.jellyfin.model_copy(update=jellyfin_updates)
     new_llm = _config.llm.model_copy(update=llm_updates)
+    if env_api_key:
+        new_llm = new_llm.model_copy(update={"api_key": env_api_key})
 
     library_sync_hours = updates.get("library_sync_hours")  # 0 (off) is a real value
     _config = AppConfig(

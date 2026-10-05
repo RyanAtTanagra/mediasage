@@ -730,3 +730,37 @@ class TestLibrarySyncHours:
 
         assert config.library_sync_hours == 0
         assert saved["library_sync_hours"] == 0
+
+
+class TestEnvApiKeyNotSaved:
+    """A provider's API key from the environment is used but never written to config.user.yaml."""
+
+    @pytest.fixture
+    def saved(self, monkeypatch):
+        for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "CUSTOM_LLM_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        current = config_module.AppConfig(
+            plex=config_module.PlexConfig(url="", token=""),
+            llm=config_module.LLMConfig(provider="gemini", api_key="saved-gemini-key",
+                                        model_analysis="m", model_generation="m"),
+        )
+        monkeypatch.setattr(config_module, "_config", current)
+        written = {}
+        monkeypatch.setattr(config_module, "save_user_config", written.update)
+        return written
+
+    def test_env_key_used_for_new_provider_but_not_saved(self, saved, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-anthropic-key")
+
+        config = config_module.update_config_values({"llm_provider": "anthropic"})
+
+        assert config.llm.api_key == "env-anthropic-key"
+        assert "api_key" not in saved["llm"]
+
+    def test_entered_key_is_saved(self, saved, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-anthropic-key")
+
+        config = config_module.update_config_values({"llm_provider": "anthropic", "llm_api_key": "typed-key"})
+
+        assert config.llm.api_key == "typed-key"
+        assert saved["llm"]["api_key"] == "typed-key"
