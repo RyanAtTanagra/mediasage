@@ -22,7 +22,7 @@ class TestLLMClientInitialization:
 
         with patch("backend.llm_client.anthropic") as mock_anthropic:
             client = LLMClient(config)
-            mock_anthropic.Anthropic.assert_called_once_with(api_key="sk-ant-test-key")
+            mock_anthropic.Anthropic.assert_called_once_with(api_key="sk-ant-test-key", timeout=600)
             assert client.provider == "anthropic"
 
     def test_openai_client_init(self, mocker):
@@ -39,7 +39,7 @@ class TestLLMClientInitialization:
 
         with patch("backend.llm_client.openai") as mock_openai:
             client = LLMClient(config)
-            mock_openai.OpenAI.assert_called_once_with(api_key="sk-test-key")
+            mock_openai.OpenAI.assert_called_once_with(api_key="sk-test-key", timeout=600)
             assert client.provider == "openai"
 
     def test_invalid_api_key_anthropic(self, mocker):
@@ -315,6 +315,49 @@ class TestOllamaProvider:
             result = LLMClient(config)._complete_ollama("prompt", "system", "qwen3:8b")
         return result, http.post.call_args.kwargs["json"]
 
+    def test_ollama_uses_configured_timeout(self):
+        """The Ollama call waits as long as the configured request timeout (#25)."""
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(
+            provider="ollama", model_analysis="m", model_generation="m", request_timeout=1800,
+        )
+        with patch("backend.llm_client.httpx.Client") as mock_httpx:
+            http = mock_httpx.return_value.__enter__.return_value
+            http.post.return_value.json.return_value = {"response": "[]"}
+            LLMClient(config)._complete_ollama("prompt", "system", "m")
+
+        assert mock_httpx.call_args.kwargs["timeout"] == 1800
+
+    def test_timeout_explains_the_setting(self):
+        import httpx
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        for timeout, waited in [(90, "90 seconds"), (900, "15 minutes")]:
+            config = LLMConfig(provider="ollama", model_analysis="m", model_generation="m", request_timeout=timeout)
+            client = LLMClient(config)
+            with patch.object(client, "_complete_ollama", side_effect=httpx.ReadTimeout("timed out")):
+                with pytest.raises(RuntimeError, match=f"within {waited}. Raise Request Timeout"):
+                    client.analyze("prompt", "system")
+
+    def test_cloud_clients_use_configured_timeout(self):
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        def config(provider):
+            return LLMConfig(provider=provider, api_key="k", model_analysis="m",
+                             model_generation="m", request_timeout=900)
+
+        with patch("backend.llm_client.anthropic") as mock_anthropic:
+            LLMClient(config("anthropic"))
+        assert mock_anthropic.Anthropic.call_args.kwargs["timeout"] == 900
+
+        with patch("backend.llm_client.genai") as mock_genai:
+            LLMClient(config("gemini"))
+        assert mock_genai.Client.call_args.kwargs["http_options"].timeout == 900_000
+
     def test_ollama_sends_context_window(self):
         """Without num_ctx Ollama truncates prompts sized for the full context (#24)."""
         _, body = self._ollama_call("[]", context_window=40960)
@@ -371,6 +414,7 @@ class TestCustomProvider:
             mock_openai.OpenAI.assert_called_once_with(
                 api_key="not-needed",
                 base_url="http://localhost:5000/v1",
+                timeout=600,
             )
             assert client.provider == "custom"
 

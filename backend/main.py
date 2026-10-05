@@ -222,6 +222,7 @@ def _build_config_response(config, media_client) -> ConfigResponse:
         ollama_context_window=config.llm.ollama_context_window,
         custom_url=config.llm.custom_url,
         custom_context_window=config.llm.custom_context_window,
+        request_timeout=config.llm.request_timeout,
         is_local_provider=is_local,
         env_overrides=env_overrides(config.llm.provider),
         long_context_threshold=gen_entry.long_context_threshold if gen_entry else None,
@@ -564,7 +565,8 @@ async def update_configuration(request: UpdateConfigRequest) -> ConfigResponse:
             config.jellyfin.music_library,
         )
 
-    if any(k in updates for k in ["llm_provider", "llm_api_key", "model_analysis", "model_generation", "ollama_url", "custom_url"]):
+    llm_keys = ["llm_provider", "llm_api_key", "model_analysis", "model_generation", "ollama_url", "custom_url", "request_timeout"]
+    if any(k in updates for k in llm_keys):
         init_llm_client(config.llm)
 
     if config.media_server != previous_server:

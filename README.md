@@ -330,6 +330,7 @@ Environment variables are optional, for scripted or automated installs. A variab
 | `OPENAI_API_KEY` | OpenAI API key |
 | `LLM_PROVIDER` | Force provider: `gemini`, `anthropic`, `openai`, `ollama`, `custom` |
 | `LLM_MODEL_ANALYSIS` / `LLM_MODEL_GENERATION` | Force the analysis or generation model |
+| `LLM_TIMEOUT` | Seconds to wait for an AI response (default: 600). Also in Settings as Request Timeout |
 | `OLLAMA_URL` | Ollama server URL (default: `http://localhost:11434`) |
 | `OLLAMA_CONTEXT_WINDOW` | Override detected context window for Ollama (default: 32768) |
 | `CUSTOM_LLM_URL` | Custom OpenAI-compatible API base URL |
@@ -421,7 +422,7 @@ For LM Studio, text-generation-webui, vLLM, or any OpenAI-compatible server:
 
 </details>
 
-**Note:** Local models are slower and may produce less accurate results than cloud providers. A 10-minute timeout is used for generation. Models with larger context windows will support more tracks.
+**Note:** Local models are slower and may produce less accurate results than cloud providers. MediaSage waits 10 minutes for a response by default; on slow hardware, raise **Request Timeout** in Settings or send fewer tracks to the AI. Models with larger context windows will support more tracks.
 
 ---
 

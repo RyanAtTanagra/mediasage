@@ -620,3 +620,26 @@ class TestUpdateConfigModels:
 
         assert config.llm.model_analysis == "claude-opus-5-5"
         assert config.llm.model_generation == "claude-sonnet-5-5"
+
+
+class TestRequestTimeout:
+    """The AI request timeout comes from LLM_TIMEOUT, the YAML file, or the 10-minute default (#25)."""
+
+    def _load(self, tmp_path, monkeypatch, env=None, yaml_timeout=None):
+        monkeypatch.delenv("LLM_TIMEOUT", raising=False)
+        if env is not None:
+            monkeypatch.setenv("LLM_TIMEOUT", env)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+        user = {"llm": {"request_timeout": yaml_timeout}} if yaml_timeout else {}
+        with patch("backend.config.load_user_yaml_config", return_value=user):
+            return load_config(config_file).llm.request_timeout
+
+    def test_default_is_ten_minutes(self, tmp_path, monkeypatch):
+        assert self._load(tmp_path, monkeypatch) == 600
+
+    def test_saved_setting(self, tmp_path, monkeypatch):
+        assert self._load(tmp_path, monkeypatch, yaml_timeout=1800) == 1800
+
+    def test_env_var_overrides(self, tmp_path, monkeypatch):
+        assert self._load(tmp_path, monkeypatch, env="2400", yaml_timeout=1800) == 2400

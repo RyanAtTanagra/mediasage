@@ -116,6 +116,14 @@ class LLMConfig(BaseModel):
     ollama_context_window: int = 32768  # Detected from model, can be overridden
     custom_url: str = ""
     custom_context_window: int = 32768
+    request_timeout: int = 600  # Seconds to wait for an AI response; local models can be slow
+
+    @field_validator("request_timeout")
+    @classmethod
+    def validate_request_timeout(cls, v: int) -> int:
+        if v < 30:
+            raise ValueError("Request timeout must be at least 30 seconds")
+        return v
 
     @field_validator("ollama_context_window", "custom_context_window")
     @classmethod
@@ -442,6 +450,7 @@ class ConfigResponse(BaseModel):
     ollama_context_window: int = 32768
     custom_url: str = ""
     custom_context_window: int = 32768
+    request_timeout: int = 600
     is_local_provider: bool = False
     # Settings fields set by environment variables (which override Settings), e.g. {"plex_url": "PLEX_URL"}
     env_overrides: dict[str, str] = {}
@@ -471,6 +480,7 @@ class UpdateConfigRequest(BaseModel):
     ollama_context_window: int | None = None
     custom_url: str | None = None
     custom_context_window: int | None = None
+    request_timeout: int | None = None
 
 
 class HealthResponse(BaseModel):

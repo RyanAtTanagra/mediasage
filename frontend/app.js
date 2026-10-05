@@ -331,18 +331,22 @@ let currentAbortController = null;
 let pendingNavHash = null;  // stored when mid-flow modal intercepts navigation
 
 
+// The server's AI request timeout plus a minute, so the server reports a timeout first
+function aiTimeoutMs() {
+    return ((state.config?.request_timeout || 600) + 60) * 1000;
+}
+
 function generatePlaylistStream(request, onProgress, onComplete, onError) {
     // Abort any previous in-flight request
     if (currentAbortController) {
         currentAbortController.abort();
     }
 
-    // Timeout handling - 10 minutes for local providers, 5 minutes for cloud
+    // Give up if the stream goes quiet for longer than the server's AI timeout
     let timeoutId = null;
     let completed = false;
     currentAbortController = new AbortController();
-    const isLocalProvider = state.config?.is_local_provider ?? false;
-    const TIMEOUT_MS = isLocalProvider ? 600000 : 300000;  // 10 min vs 5 min
+    const TIMEOUT_MS = aiTimeoutMs();
 
     function resetTimeout() {
         if (timeoutId) clearTimeout(timeoutId);
@@ -1755,6 +1759,7 @@ function updateSettings() {
         : 'sk-... (optional)';
     customModel.value = state.config.model_analysis || '';  // Custom uses same model for both
     customContext.value = state.config.custom_context_window || 32768;
+    document.getElementById('llm-request-timeout').value = Math.round((state.config.request_timeout || 600) / 60);
 
     // Update status indicators
     // plex_connected reports whichever server is active; the other one's fields are hidden
@@ -1797,6 +1802,7 @@ const ENV_OVERRIDABLE_INPUTS = {
     model_generation: ['cloud-model-generation'],
     ollama_url: ['ollama-url'],
     custom_url: ['custom-url'],
+    request_timeout: ['llm-request-timeout'],
 };
 
 function applyEnvOverrides() {
@@ -3441,6 +3447,9 @@ async function handleSaveSettings() {
         if (cloudModelGeneration) updates.model_generation = cloudModelGeneration;
     }
 
+    const timeoutMinutes = parseInt(document.getElementById('llm-request-timeout').value);
+    if (timeoutMinutes > 0) updates.request_timeout = timeoutMinutes * 60;
+
     // Fields set by environment variables are read-only here
     for (const field of Object.keys(state.config?.env_overrides || {})) {
         delete updates[field];
@@ -4557,12 +4566,12 @@ async function handleRecGenerate() {
     ];
     showStepLoading(progressSteps);
 
-    // Abort if no data arrives for 120 seconds (server hang, network loss)
+    // Abort if no data arrives within the AI timeout (server hang, network loss)
     const controller = new AbortController();
-    let staleTimer = setTimeout(() => controller.abort(), 120000);
+    let staleTimer = setTimeout(() => controller.abort(), aiTimeoutMs());
     const resetStaleTimer = () => {
         clearTimeout(staleTimer);
-        staleTimer = setTimeout(() => controller.abort(), 120000);
+        staleTimer = setTimeout(() => controller.abort(), aiTimeoutMs());
     };
 
     try {

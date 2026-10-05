@@ -151,6 +151,7 @@ _ENV_OVERRIDABLE = {
     "model_generation": "LLM_MODEL_GENERATION",
     "ollama_url": "OLLAMA_URL",
     "custom_url": "CUSTOM_LLM_URL",
+    "request_timeout": "LLM_TIMEOUT",
 }
 
 _API_KEY_ENV = {
@@ -302,6 +303,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             provider_defaults["generation"],
         )
 
+    request_timeout = int(get_env_or_yaml("LLM_TIMEOUT", llm_yaml.get("request_timeout"), 600))
+
     llm_config = LLMConfig(
         provider=provider,
         api_key=api_key,
@@ -312,6 +315,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         ollama_context_window=ollama_context_window,
         custom_url=custom_url,
         custom_context_window=custom_context_window,
+        request_timeout=request_timeout,
     )
 
     defaults_config = DefaultsConfig(
@@ -415,6 +419,8 @@ def update_config_values(updates: dict[str, Any]) -> AppConfig:
         llm_updates["custom_url"] = updates["custom_url"]
     if "custom_context_window" in updates and updates["custom_context_window"]:
         llm_updates["custom_context_window"] = updates["custom_context_window"]
+    if updates.get("request_timeout"):
+        llm_updates["request_timeout"] = updates["request_timeout"]
 
     # Create new config with updates
     new_plex = _config.plex.model_copy(update=plex_updates)
