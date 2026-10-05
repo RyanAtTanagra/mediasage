@@ -17,7 +17,17 @@ from fastapi.responses import HTMLResponse
 from starlette.responses import StreamingResponse
 import httpx
 
-from backend.config import get_config, get_current_media_client, update_config_values, load_user_yaml_config, save_user_config, ConfigSaveError, MODEL_DEFAULTS
+from backend.config import (
+    MODEL_DEFAULTS,
+    ConfigSaveError,
+    env_overrides,
+    get_config,
+    get_current_media_client,
+    load_user_yaml_config,
+    provider_api_key,
+    save_user_config,
+    update_config_values,
+)
 from backend.version import get_version
 from backend.models import (
     AlbumCandidate,
@@ -28,6 +38,7 @@ from backend.models import (
     AnalyzePromptResponse,
     AnalyzeTrackRequest,
     AnalyzeTrackResponse,
+    ArtistCount,
     CloudModel,
     CloudModelsResponse,
     CloudProviderModels,
@@ -135,10 +146,15 @@ async def lifespan(app: FastAPI):
         if library_cache.needs_resync() or (server_id and library_cache.check_server_changed(server_id)):
             logger.info("Library cache is out of date — starting automatic re-sync")
             asyncio.create_task(asyncio.to_thread(library_cache.sync_library, media_client))
+        else:
+            _sync_if_stale()
+
+    freshness_task = asyncio.create_task(_keep_library_fresh())
 
     yield
 
     # Shutdown: clean up resources
+    freshness_task.cancel()
     if _music_research_client is not None:
         await _music_research_client.close()
     if _art_proxy_client is not None:
@@ -156,6 +172,29 @@ app = FastAPI(
 # =============================================================================
 # Config Helpers
 # =============================================================================
+
+
+LIBRARY_CHECK_INTERVAL = 3600  # seconds between staleness checks
+
+
+def _sync_if_stale() -> None:
+    """Start a background sync once the cache is older than the auto-refresh setting (0 = off)."""
+    max_age_hours = get_config().library_sync_hours
+    if max_age_hours <= 0 or library_cache.get_sync_progress()["is_syncing"]:
+        return
+    media_client = get_current_media_client()
+    if media_client and media_client.is_connected() and library_cache.is_cache_stale(max_age_hours):
+        logger.info("Library cache is more than %g hours old — syncing", max_age_hours)
+        asyncio.create_task(asyncio.to_thread(library_cache.sync_library, media_client))
+
+
+async def _keep_library_fresh() -> None:
+    while True:
+        await asyncio.sleep(LIBRARY_CHECK_INTERVAL)
+        try:
+            _sync_if_stale()
+        except Exception:
+            logger.exception("Library freshness check failed")
 
 
 def _resync_for_new_media_server() -> None:
@@ -200,6 +239,9 @@ def _build_config_response(config, media_client) -> ConfigResponse:
         llm_provider=config.llm.provider,
         llm_configured=_is_llm_configured(config),
         llm_api_key_set=bool(config.llm.api_key),
+        api_key_providers=[
+            p for p in ("anthropic", "openai", "gemini", "custom") if provider_api_key(p, config.llm.api_keys)
+        ],
         model_analysis=analysis_model,
         model_generation=generation_model,
         max_tracks_to_ai=max_tracks,
@@ -213,12 +255,10 @@ def _build_config_response(config, media_client) -> ConfigResponse:
         ollama_context_window=config.llm.ollama_context_window,
         custom_url=config.llm.custom_url,
         custom_context_window=config.llm.custom_context_window,
+        request_timeout=config.llm.request_timeout,
+        library_sync_hours=config.library_sync_hours,
         is_local_provider=is_local,
-        provider_from_env=os.environ.get("LLM_PROVIDER") is not None,
-        media_server_from_env=os.environ.get("MEDIA_SERVER") is not None,
-        models_from_env=bool(
-            os.environ.get("LLM_MODEL_ANALYSIS") or os.environ.get("LLM_MODEL_GENERATION")
-        ),
+        env_overrides=env_overrides(config.llm.provider),
         long_context_threshold=gen_entry.long_context_threshold if gen_entry else None,
         long_context_cost_per_million_input=gen_entry.long_input_cost if gen_entry else None,
         long_context_cost_per_million_output=gen_entry.long_output_cost if gen_entry else None,
@@ -452,11 +492,21 @@ async def setup_validate_ai(request: ValidateAIRequest) -> ValidateAIResponse:
             )
 
         elif provider == "ollama":
-            status = await asyncio.to_thread(get_ollama_status, request.ollama_url or "http://localhost:11434")
+            ollama_url = request.ollama_url or "http://localhost:11434"
+            status = await asyncio.to_thread(get_ollama_status, ollama_url)
             if not status.connected:
                 return ValidateAIResponse(
                     success=False,
                     error=status.error or "Cannot connect to Ollama",
+                    provider_name=provider_name,
+                )
+            if not request.ollama_model:
+                return ValidateAIResponse(success=False, error="Choose a model", provider_name=provider_name)
+            ollama_model_info = await asyncio.to_thread(get_ollama_model_info, ollama_url, request.ollama_model)
+            if not ollama_model_info:
+                return ValidateAIResponse(
+                    success=False,
+                    error=f"Model {request.ollama_model} not found in Ollama",
                     provider_name=provider_name,
                 )
 
@@ -464,6 +514,10 @@ async def setup_validate_ai(request: ValidateAIRequest) -> ValidateAIResponse:
             if not request.custom_url:
                 return ValidateAIResponse(
                     success=False, error="Custom URL is required", provider_name=provider_name
+                )
+            if not request.custom_model:
+                return ValidateAIResponse(
+                    success=False, error="Model name is required", provider_name=provider_name
                 )
             headers = {}
             if request.api_key:
@@ -490,10 +544,16 @@ async def setup_validate_ai(request: ValidateAIRequest) -> ValidateAIResponse:
     config_updates = {"llm_provider": provider}
     if request.api_key:
         config_updates["llm_api_key"] = request.api_key
-    if provider == "ollama" and request.ollama_url:
-        config_updates["ollama_url"] = request.ollama_url
+    if provider == "ollama":
+        if request.ollama_url:
+            config_updates["ollama_url"] = request.ollama_url
+        config_updates["model_analysis"] = request.ollama_model
+        config_updates["model_generation"] = request.ollama_model
+        config_updates["ollama_context_window"] = ollama_model_info.context_window
     if provider == "custom" and request.custom_url:
         config_updates["custom_url"] = request.custom_url
+        config_updates["model_analysis"] = request.custom_model
+        config_updates["model_generation"] = request.custom_model
 
     try:
         config = update_config_values(config_updates)
@@ -559,7 +619,8 @@ async def update_configuration(request: UpdateConfigRequest) -> ConfigResponse:
             config.jellyfin.music_library,
         )
 
-    if any(k in updates for k in ["llm_provider", "llm_api_key", "model_analysis", "model_generation", "ollama_url", "custom_url"]):
+    llm_keys = ["llm_provider", "llm_api_key", "model_analysis", "model_generation", "ollama_url", "custom_url", "request_timeout"]
+    if any(k in updates for k in llm_keys):
         init_llm_client(config.llm)
 
     if config.media_server != previous_server:
@@ -724,6 +785,15 @@ async def get_library_stats_cached() -> LibraryStatsResponse:
     )
 
 
+@app.get("/api/library/artists", response_model=list[ArtistCount])
+async def search_library_artists(q: str = Query("", description="Part of an artist name")) -> list[ArtistCount]:
+    """Artists in the synced library matching q, most tracks first (for the artist filter)."""
+    if not library_cache.has_cached_tracks():
+        return []
+    artists = await asyncio.to_thread(library_cache.search_artists, q.strip())
+    return [ArtistCount(**a) for a in artists]
+
+
 @app.get("/api/library/search", response_model=list[Track])
 async def search_library(q: str = Query(..., description="Search query")) -> list[Track]:
     """Search for tracks in the library."""
@@ -807,6 +877,8 @@ async def preview_filters(request: FilterPreviewRequest) -> FilterPreviewRespons
             decades=decades,
             min_rating=min_rating,
             exclude_live=exclude_live,
+            artists=request.artists,
+            exclude_artists=request.exclude_artists,
         )
 
     if matching_tracks < 0:
@@ -906,6 +978,8 @@ async def generate_playlist_sse(request: GenerateRequest) -> StreamingResponse:
             exclude_live=request.exclude_live,
             min_rating=request.min_rating,
             max_tracks_to_ai=request.max_tracks_to_ai,
+            artists=request.artists,
+            exclude_artists=request.exclude_artists,
         )
 
     return StreamingResponse(

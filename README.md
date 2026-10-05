@@ -106,6 +106,7 @@ Describe a mood or moment, answer two quick questions about your preferences, an
 Before the AI sees anything, you control the pool:
 - **Genres** — Select from your library's actual genre tags
 - **Decades** — Filter by era
+- **Artists** — Only include, or leave out, specific artists. Ask for "a Radiohead playlist" and the artist filter is filled in for you (matched on album artist, so tracks on "Various Artists" compilations aren't included)
 - **Minimum rating** — Only tracks rated 3+, 4+, etc. (Plex only; Jellyfin has no star ratings)
 - **Exclude live versions** — Skip concert recordings automatically
 
@@ -117,7 +118,8 @@ MediaSage syncs your music library to a local SQLite database. After a one-time 
 
 - **Setup wizard** walks you through first-run configuration and sync
 - **Footer status** shows track count and last sync time
-- **Manual refresh** available anytime; refresh after adding music
+- **Auto-refresh** re-syncs once the cache is older than the interval in Settings (daily by default; every 6 or 12 hours, weekly, or off)
+- **Manual refresh** available anytime, e.g. right after adding music
 - **Switching servers** between Plex and Jellyfin re-syncs automatically
 
 ### Multi-Provider Support
@@ -162,25 +164,20 @@ curl -O https://raw.githubusercontent.com/RyanAtTanagra/mediasage/main/.env.exam
 mv .env.example .env
 ```
 
-Edit `.env`:
-
-```bash
-PLEX_URL=http://your-plex-server:32400
-PLEX_TOKEN=your-plex-token
-
-# Choose ONE provider:
-GEMINI_API_KEY=your-gemini-key
-# ANTHROPIC_API_KEY=sk-ant-your-key
-# OPENAI_API_KEY=sk-your-key
-```
-
-Start:
+Start it and open **http://localhost:5765** to run the setup wizard:
 
 ```bash
 docker compose up -d
 ```
 
-**Using Jellyfin?** Leave the Plex lines out of `.env`, start the container, and choose Jellyfin in the setup wizard. To configure it with environment variables instead, uncomment the `JELLYFIN_*` lines in `docker-compose.yml` and set them in `.env`.
+`.env` is optional. To manage some settings there instead of in the UI, uncomment them in `.env`, for example:
+
+```bash
+PLEX_URL=http://your-plex-server:32400
+PLEX_TOKEN=your-plex-token
+GEMINI_API_KEY=your-gemini-key
+# Or for Jellyfin: JELLYFIN_URL, JELLYFIN_TOKEN
+```
 
 ### NAS Platforms
 
@@ -221,9 +218,7 @@ Community Apps, install it through **Docker → Add Container**:
 4. Open the WebUI and complete the setup wizard
 
 The template runs the container as Unraid's standard `nobody:users` account
-(`99:100`) so Docker-created appdata is writable. Avoid adding blank optional
-environment variables: environment values override settings saved through the
-setup wizard.
+(`99:100`) so Docker-created appdata is writable.
 
 Maintainers can publish the template by submitting this repository through the
 [Unraid Community Apps portal](https://ca.unraid.net/submit). The portal still
@@ -320,7 +315,7 @@ The usual way to configure MediaSage is the setup wizard on first launch, then t
 
 ### Environment Variables
 
-Environment variables are optional, for scripted or automated installs. **A variable that's set always overrides what's saved in Settings**, even if its value is empty, so only set the ones you mean to control. Settings shows a note next to the media server, AI provider and model fields when a variable controls them.
+Environment variables are optional, for scripted or automated installs. A variable with a value overrides what's saved in Settings, and the matching field in Settings is locked with a note naming the variable. Empty variables are ignored, so the compose file's `PLEX_URL=${PLEX_URL:-}`-style lines are harmless when `.env` leaves them unset.
 
 | Variable | Description |
 |----------|-------------|
@@ -337,10 +332,13 @@ Environment variables are optional, for scripted or automated installs. **A vari
 | `OPENAI_API_KEY` | OpenAI API key |
 | `LLM_PROVIDER` | Force provider: `gemini`, `anthropic`, `openai`, `ollama`, `custom` |
 | `LLM_MODEL_ANALYSIS` / `LLM_MODEL_GENERATION` | Force the analysis or generation model |
+| `LLM_TIMEOUT` | Seconds to wait for an AI response (default: 600). Also in Settings as Request Timeout |
+| `LIBRARY_SYNC_HOURS` | Re-sync the library cache once it's this many hours old (default: 24; `0` turns automatic re-syncs off). Also in Settings as Auto-Refresh Library |
 | `OLLAMA_URL` | Ollama server URL (default: `http://localhost:11434`) |
 | `OLLAMA_CONTEXT_WINDOW` | Override detected context window for Ollama (default: 32768) |
 | `CUSTOM_LLM_URL` | Custom OpenAI-compatible API base URL |
 | `CUSTOM_LLM_API_KEY` | API key for custom provider (if required) |
+| `CUSTOM_LLM_MODEL` | Model name for the custom provider, used for analysis and generation |
 | `CUSTOM_CONTEXT_WINDOW` | Context window size for custom provider (default: 32768) |
 
 ### Jellyfin
@@ -416,19 +414,19 @@ Run MediaSage with local models for privacy and zero API costs.
 <details>
 <summary><strong>Custom OpenAI-Compatible API</strong></summary>
 
-For LM Studio, text-generation-webui, vLLM, or any OpenAI-compatible server:
+For LM Studio, text-generation-webui, vLLM, or any OpenAI-compatible service (OpenRouter, Mammouth, etc.):
 
-1. Start your server with an OpenAI-compatible endpoint
+1. Start your server, or get the service's base URL and API key
 
-2. Configure in Settings:
+2. Configure in the setup wizard or Settings (or with `CUSTOM_LLM_URL`, `CUSTOM_LLM_API_KEY` and `CUSTOM_LLM_MODEL`):
    - **API Base URL:** `http://localhost:5000/v1`
    - **API Key:** If required by your server
-   - **Model Name:** The model identifier
-   - **Context Window:** Your model's context size
+   - **Model Name:** The model identifier (required; the service's `/v1/models` lists them)
+   - **Context Window:** Your model's context size (Settings only)
 
 </details>
 
-**Note:** Local models are slower and may produce less accurate results than cloud providers. A 10-minute timeout is used for generation. Models with larger context windows will support more tracks.
+**Note:** Local models are slower and may produce less accurate results than cloud providers. MediaSage waits 10 minutes for a response by default; on slow hardware, raise **Request Timeout** in Settings or send fewer tracks to the AI. Models with larger context windows will support more tracks.
 
 ---
 
@@ -517,6 +515,7 @@ Interactive documentation available at `/docs` when running.
 | `/api/library/status` | GET | Cache state, track count, sync progress |
 | `/api/library/sync` | POST | Trigger background library sync |
 | `/api/library/search` | GET | Search library tracks |
+| `/api/library/artists` | GET | Search library artists (for the artist filter) |
 | `/api/analyze/prompt` | POST | Analyze natural language prompt |
 | `/api/analyze/track` | POST | Analyze a seed track |
 | `/api/filter/preview` | POST | Preview filtered track list |

@@ -92,6 +92,8 @@ const state = {
     availableDecades: [],
     selectedGenres: [],
     selectedDecades: [],
+    includedArtists: [],
+    excludedArtists: [],
     trackCount: 25,
     excludeLive: true,
     maxTracksToAI: 500,  // 0 = no limit
@@ -291,7 +293,7 @@ async function validateJellyfin(url, token, library) {
     });
 }
 
-async function validateAI(provider, apiKey, ollamaUrl, customUrl) {
+async function validateAI(provider, apiKey, ollamaUrl, customUrl, customModel, ollamaModel) {
     return apiCall('/setup/validate-ai', {
         method: 'POST',
         body: JSON.stringify({
@@ -299,6 +301,8 @@ async function validateAI(provider, apiKey, ollamaUrl, customUrl) {
             api_key: apiKey || '',
             ollama_url: ollamaUrl || '',
             custom_url: customUrl || '',
+            custom_model: customModel || '',
+            ollama_model: ollamaModel || '',
         }),
     });
 }
@@ -331,18 +335,22 @@ let currentAbortController = null;
 let pendingNavHash = null;  // stored when mid-flow modal intercepts navigation
 
 
+// The server's AI request timeout plus a minute, so the server reports a timeout first
+function aiTimeoutMs() {
+    return ((state.config?.request_timeout || 600) + 60) * 1000;
+}
+
 function generatePlaylistStream(request, onProgress, onComplete, onError) {
     // Abort any previous in-flight request
     if (currentAbortController) {
         currentAbortController.abort();
     }
 
-    // Timeout handling - 10 minutes for local providers, 5 minutes for cloud
+    // Give up if the stream goes quiet for longer than the server's AI timeout
     let timeoutId = null;
     let completed = false;
     currentAbortController = new AbortController();
-    const isLocalProvider = state.config?.is_local_provider ?? false;
-    const TIMEOUT_MS = isLocalProvider ? 600000 : 300000;  // 10 min vs 5 min
+    const TIMEOUT_MS = aiTimeoutMs();
 
     function resetTimeout() {
         if (timeoutId) clearTimeout(timeoutId);
@@ -520,6 +528,10 @@ async function sendPlaylistUpdate(playlistId, ratingKeys, mode, description = ''
             description,
         }),
     });
+}
+
+async function fetchArtists(query) {
+    return apiCall(`/library/artists?q=${encodeURIComponent(query)}`);
 }
 
 async function fetchLibraryStats() {
@@ -1131,6 +1143,69 @@ function updateStep() {
     }
 }
 
+function renderArtistChips() {
+    for (const [kind, key] of [['include', 'includedArtists'], ['exclude', 'excludedArtists']]) {
+        document.getElementById(`artist-${kind}-chips`).innerHTML = state[key].map(name => `
+            <button class="chip selected" data-artist="${escapeHtml(name)}" data-list="${key}"
+                    aria-label="Remove ${escapeHtml(name)}">
+                ${escapeHtml(name)} <span aria-hidden="true">&times;</span>
+            </button>
+        `).join('');
+    }
+}
+
+// Artist picker: suggestions come from the synced library; an artist is added once the
+// input exactly matches one (picked from the list, or typed and Enter pressed)
+function setupArtistFilter(kind, key) {
+    const input = document.getElementById(`artist-${kind}-input`);
+    const options = document.getElementById('artist-options');
+    let suggestions = [];
+    let debounce = null;
+
+    const addIfKnown = () => {
+        const match = suggestions.find(a => a.name.toLowerCase() === input.value.trim().toLowerCase());
+        if (!match) return false;
+        if (!state[key].includes(match.name)) {
+            state[key].push(match.name);
+            renderArtistChips();
+            updateFilterPreview();
+        }
+        input.value = '';
+        return true;
+    };
+
+    input.addEventListener('input', (e) => {
+        // Picking a suggestion isn't typing: Chrome sends no inputType, Firefox insertReplacementText
+        const picked = e.inputType === undefined || e.inputType === 'insertReplacementText';
+        if (picked && addIfKnown()) return;
+        clearTimeout(debounce);
+        debounce = setTimeout(async () => {
+            try {
+                suggestions = await fetchArtists(input.value.trim());
+            } catch {
+                suggestions = [];
+            }
+            options.innerHTML = suggestions.map(a =>
+                `<option value="${escapeHtml(a.name)}" label="${a.count} tracks"></option>`
+            ).join('');
+        }, 200);
+    });
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            addIfKnown();
+        }
+    });
+
+    document.getElementById(`artist-${kind}-chips`).addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-artist]');
+        if (!chip) return;
+        state[key] = state[key].filter(name => name !== chip.dataset.artist);
+        renderArtistChips();
+        updateFilterPreview();
+    });
+}
+
 function updateFilters() {
     // Remember which chip had focus so we can restore it after re-render
     const focused = document.activeElement;
@@ -1180,6 +1255,8 @@ function updateFilters() {
         decadeToggle.setAttribute('aria-label',
             allSelected ? 'Deselect all decades' : 'Select all decades');
     }
+
+    renderArtistChips();
 
     // Restore focus to the chip that was active before re-render
     if (focusedGenre) {
@@ -1374,6 +1451,8 @@ async function updateFilterPreview() {
         const requestBody = {
             genres: allGenresSelected() ? [] : state.selectedGenres,
             decades: allDecadesSelected() ? [] : state.selectedDecades,
+            artists: state.includedArtists,
+            exclude_artists: state.excludedArtists,
             track_count: state.trackCount,
             max_tracks_to_ai: state.maxTracksToAI,
             min_rating: state.minRating,
@@ -1716,7 +1795,6 @@ function updateSettings() {
 
     const mediaServer = state.config.media_server || 'plex';
     document.getElementById('settings-media-server').value = mediaServer;
-    document.getElementById('media-server-env-warning').classList.toggle('hidden', !state.config.media_server_from_env);
     showServerFields('settings', mediaServer);
 
     document.getElementById('plex-url').value = state.config.plex_url || '';
@@ -1729,22 +1807,13 @@ function updateSettings() {
         ? '•••••••••••••••• (configured)'
         : 'Your Jellyfin API key';
 
-    // Show warning if provider is set by environment variable
-    const providerEnvWarning = document.getElementById('provider-env-warning');
-    if (providerEnvWarning) {
-        providerEnvWarning.classList.toggle('hidden', !state.config.provider_from_env);
-    }
-
     // Update token/key placeholders to indicate if configured
     const plexTokenInput = document.getElementById('plex-token');
     plexTokenInput.placeholder = state.config.plex_token_set
         ? '••••••••••••••••  (configured)'
         : 'Your Plex token';
 
-    const llmApiKeyInput = document.getElementById('llm-api-key');
-    llmApiKeyInput.placeholder = state.config.llm_api_key_set
-        ? '••••••••••••••••  (configured)'
-        : 'Your API key';
+    updateApiKeyPlaceholder(state.config.llm_provider);
 
     // Update Ollama settings
     const ollamaUrl = document.getElementById('ollama-url');
@@ -1757,11 +1826,13 @@ function updateSettings() {
     const customContext = document.getElementById('custom-context-window');
     customUrl.value = state.config.custom_url || '';
     customApiKey.value = '';  // Never show actual key
-    customApiKey.placeholder = state.config.llm_api_key_set && state.config.llm_provider === 'custom'
+    customApiKey.placeholder = (state.config.api_key_providers || []).includes('custom')
         ? '••••••••••••• (key saved)'
         : 'sk-... (optional)';
     customModel.value = state.config.model_analysis || '';  // Custom uses same model for both
     customContext.value = state.config.custom_context_window || 32768;
+    document.getElementById('llm-request-timeout').value = Math.round((state.config.request_timeout || 600) / 60);
+    setLibrarySyncSelect(state.config.library_sync_hours ?? 24);
 
     // Update status indicators
     // plex_connected reports whichever server is active; the other one's fields are hidden
@@ -1786,6 +1857,58 @@ function updateSettings() {
 
     // Show provider-specific settings
     showProviderSettings(state.config.llm_provider);
+    applyEnvOverrides();
+}
+
+// Settings inputs for each field an environment variable can override (env_overrides in /api/config)
+const ENV_OVERRIDABLE_INPUTS = {
+    media_server: ['settings-media-server'],
+    plex_url: ['plex-url'],
+    plex_token: ['plex-token'],
+    music_library: ['music-library'],
+    jellyfin_url: ['jellyfin-url'],
+    jellyfin_token: ['jellyfin-token'],
+    jellyfin_music_library: ['jellyfin-music-library'],
+    llm_provider: ['llm-provider'],
+    llm_api_key: ['llm-api-key', 'custom-api-key'],
+    model_analysis: ['cloud-model-analysis', 'custom-model'],
+    model_generation: ['cloud-model-generation'],
+    ollama_url: ['ollama-url'],
+    custom_url: ['custom-url'],
+    request_timeout: ['llm-request-timeout'],
+    library_sync_hours: ['library-sync-hours'],
+};
+
+// Selects the matching option, adding one for an interval set in YAML or LIBRARY_SYNC_HOURS
+function setLibrarySyncSelect(hours) {
+    const select = document.getElementById('library-sync-hours');
+    if (![...select.options].some(o => parseFloat(o.value) === hours)) {
+        select.add(new Option(`Every ${hours} hours`, String(hours)));
+    }
+    select.value = [...select.options].find(o => parseFloat(o.value) === hours).value;
+}
+
+function applyEnvOverrides() {
+    const overrides = state.config.env_overrides || {};
+    for (const [field, ids] of Object.entries(ENV_OVERRIDABLE_INPUTS)) {
+        const envVar = overrides[field];
+        for (const id of ids) {
+            const input = document.getElementById(id);
+            input.disabled = Boolean(envVar);
+
+            let note = document.getElementById(`${id}-env-note`);
+            if (envVar && !note) {
+                note = document.createElement('p');
+                note.id = `${id}-env-note`;
+                note.className = 'env-warning';
+                input.insertAdjacentElement('afterend', note);
+            }
+            if (note) {
+                note.innerHTML = envVar ? `Set by the <code>${escapeHtml(envVar)}</code> environment variable.` : '';
+                note.classList.toggle('hidden', !envVar);
+            }
+        }
+    }
 }
 
 function showServerFields(prefix, server) {
@@ -1795,6 +1918,14 @@ function showServerFields(prefix, server) {
 
 function isSetupServerConnected(status) {
     return status.media_server === 'jellyfin' ? status.jellyfin_connected : status.plex_connected;
+}
+
+// Keys are stored per provider, so show whether the selected provider has one
+function updateApiKeyPlaceholder(provider) {
+    const hasKey = (state.config?.api_key_providers || []).includes(provider);
+    document.getElementById('llm-api-key').placeholder = hasKey
+        ? '••••••••••••••••  (configured)'
+        : 'Your API key';
 }
 
 function mediaServerLabel() {
@@ -1872,11 +2003,6 @@ async function populateCloudModels(provider) {
     generationSelect.innerHTML = buildOptions(selectedGeneration);
     analysisSelect.value = selectedAnalysis;
     generationSelect.value = selectedGeneration;
-
-    const fromEnv = Boolean(state.config?.models_from_env);
-    analysisSelect.disabled = fromEnv;
-    generationSelect.disabled = fromEnv;
-    document.getElementById('models-env-warning').classList.toggle('hidden', !fromEnv);
 
     updateCloudModelInfo();
 }
@@ -2293,6 +2419,8 @@ function resetPlaylistState() {
     state.additionalNotes = '';
     state.selectedGenres = [];
     state.selectedDecades = [];
+    state.includedArtists = [];
+    state.excludedArtists = [];
     state.playlist = [];
     state.playlistName = '';
     state.tokenCount = 0;
@@ -2695,6 +2823,9 @@ function setupEventListeners() {
     document.getElementById('continue-to-filters-btn').addEventListener('click', handleContinueToFilters);
 
     // Genre toggle all
+    setupArtistFilter('include', 'includedArtists');
+    setupArtistFilter('exclude', 'excludedArtists');
+
     document.getElementById('genre-toggle-all').addEventListener('click', () => {
         state.selectedGenres = allGenresSelected() ? [] : state.availableGenres.map(g => g.name);
         updateFilters();
@@ -2815,6 +2946,7 @@ function setupEventListeners() {
     // Provider selection change
     document.getElementById('llm-provider').addEventListener('change', (e) => {
         showProviderSettings(e.target.value);
+        updateApiKeyPlaceholder(e.target.value);
     });
 
     document.getElementById('cloud-model-generation').addEventListener('change', updateCloudModelInfo);
@@ -3150,6 +3282,8 @@ async function handleContinueToFilters() {
         state.availableDecades = stats.decades;
         state.selectedGenres = stats.genres.map(g => g.name);
         state.selectedDecades = stats.decades.map(d => d.name);
+        state.includedArtists = [];
+        state.excludedArtists = [];
 
         state.step = 'filters';
         updateStep();
@@ -3167,6 +3301,8 @@ async function handleGenerate() {
     const request = {
         genres: allGenresSelected() ? [] : state.selectedGenres,
         decades: allDecadesSelected() ? [] : state.selectedDecades,
+        artists: state.includedArtists,
+        exclude_artists: state.excludedArtists,
         track_count: state.trackCount,
         exclude_live: state.excludeLive,
         min_rating: state.minRating,
@@ -3406,12 +3542,20 @@ async function handleSaveSettings() {
     } else {
         // Cloud providers need API key
         if (llmApiKey) updates.llm_api_key = llmApiKey;
-        if (!state.config?.models_from_env) {
-            const cloudModelAnalysis = document.getElementById('cloud-model-analysis').value;
-            const cloudModelGeneration = document.getElementById('cloud-model-generation').value;
-            if (cloudModelAnalysis) updates.model_analysis = cloudModelAnalysis;
-            if (cloudModelGeneration) updates.model_generation = cloudModelGeneration;
-        }
+        const cloudModelAnalysis = document.getElementById('cloud-model-analysis').value;
+        const cloudModelGeneration = document.getElementById('cloud-model-generation').value;
+        if (cloudModelAnalysis) updates.model_analysis = cloudModelAnalysis;
+        if (cloudModelGeneration) updates.model_generation = cloudModelGeneration;
+    }
+
+    updates.library_sync_hours = parseFloat(document.getElementById('library-sync-hours').value);
+
+    const timeoutMinutes = parseInt(document.getElementById('llm-request-timeout').value);
+    if (timeoutMinutes > 0) updates.request_timeout = timeoutMinutes * 60;
+
+    // Fields set by environment variables are read-only here
+    for (const field of Object.keys(state.config?.env_overrides || {})) {
+        delete updates[field];
     }
 
     if (Object.keys(updates).length === 0) {
@@ -4459,6 +4603,8 @@ async function handlePlaylistRefineNext() {
         state.availableDecades = response.available_decades;
         state.selectedGenres = response.suggested_genres;
         state.selectedDecades = response.suggested_decades;
+        state.includedArtists = response.suggested_artists || [];
+        state.excludedArtists = [];
     } else {
         // Fallback: fetch stats directly if analysis failed
         try {
@@ -4525,12 +4671,12 @@ async function handleRecGenerate() {
     ];
     showStepLoading(progressSteps);
 
-    // Abort if no data arrives for 120 seconds (server hang, network loss)
+    // Abort if no data arrives within the AI timeout (server hang, network loss)
     const controller = new AbortController();
-    let staleTimer = setTimeout(() => controller.abort(), 120000);
+    let staleTimer = setTimeout(() => controller.abort(), aiTimeoutMs());
     const resetStaleTimer = () => {
         clearTimeout(staleTimer);
-        staleTimer = setTimeout(() => controller.abort(), 120000);
+        staleTimer = setTimeout(() => controller.abort(), aiTimeoutMs());
     };
 
     try {
@@ -5171,6 +5317,28 @@ const SETUP_AI_HINTS = {
     custom: 'Any OpenAI-compatible API endpoint',
 };
 
+// Fill the setup wizard's Ollama model list from the server at the entered URL
+async function loadSetupOllamaModels() {
+    const select = document.getElementById('setup-ai-ollama-model');
+    const url = document.getElementById('setup-ai-ollama-url').value.trim();
+    const setOnly = (text) => {
+        select.innerHTML = `<option value="">${escapeHtml(text)}</option>`;
+        select.disabled = true;
+    };
+    if (!url) return setOnly('Enter your Ollama URL to list models');
+
+    setOnly('Loading models...');
+    try {
+        const { models = [], error } = await fetchOllamaModels(url);
+        if (error) return setOnly(error);
+        if (!models.length) return setOnly('No models installed (run: ollama pull <model>)');
+        select.innerHTML = models.map(m => `<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)}</option>`).join('');
+        select.disabled = false;
+    } catch {
+        setOnly(`Cannot reach Ollama at ${url}`);
+    }
+}
+
 function enterSetupWizard(status) {
     state.setup.active = true;
     state.setup.status = status;
@@ -5445,22 +5613,37 @@ function setupWizardEventListeners() {
         ollamaGroup.classList.toggle('hidden', provider !== 'ollama');
         customGroup.classList.toggle('hidden', provider !== 'custom');
         if (hintEl) hintEl.innerHTML = SETUP_AI_HINTS[provider] || '';
+        if (provider === 'ollama') loadSetupOllamaModels();
+    });
+
+    let ollamaUrlDebounce = null;
+    document.getElementById('setup-ai-ollama-url').addEventListener('input', () => {
+        clearTimeout(ollamaUrlDebounce);
+        ollamaUrlDebounce = setTimeout(loadSetupOllamaModels, 500);
     });
 
     // AI validation
     document.getElementById('setup-ai-btn').addEventListener('click', async () => {
         const provider = document.getElementById('setup-ai-provider').value;
-        const apiKey = document.getElementById('setup-ai-key')?.value.trim() || '';
         const ollamaUrl = document.getElementById('setup-ai-ollama-url')?.value.trim() || '';
         const customUrl = document.getElementById('setup-ai-custom-url')?.value.trim() || '';
+        const customModel = document.getElementById('setup-ai-custom-model').value.trim();
+        const ollamaModel = document.getElementById('setup-ai-ollama-model').value;
+        const apiKey = provider === 'custom'
+            ? document.getElementById('setup-ai-custom-key').value.trim()
+            : document.getElementById('setup-ai-key')?.value.trim() || '';
 
         // Basic client-side validation
         if (['gemini', 'anthropic', 'openai'].includes(provider) && !apiKey) {
             setStepError('ai', 'API key is required');
             return;
         }
-        if (provider === 'custom' && !customUrl) {
-            setStepError('ai', 'API URL is required');
+        if (provider === 'custom' && (!customUrl || !customModel)) {
+            setStepError('ai', 'API URL and model name are required');
+            return;
+        }
+        if (provider === 'ollama' && !ollamaModel) {
+            setStepError('ai', 'Choose a model');
             return;
         }
 
@@ -5470,7 +5653,7 @@ function setupWizardEventListeners() {
         btn.textContent = 'Validating...';
 
         try {
-            const result = await validateAI(provider, apiKey, ollamaUrl, customUrl);
+            const result = await validateAI(provider, apiKey, ollamaUrl, customUrl, customModel, ollamaModel);
             if (result.success) {
                 state.setup.status.llm_configured = true;
                 state.setup.status.llm_provider = provider;

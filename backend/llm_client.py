@@ -18,6 +18,8 @@ from backend.models import LLMConfig, OllamaModel, OllamaModelInfo, OllamaModels
 
 logger = logging.getLogger(__name__)
 
+_TIMEOUT_ERRORS = (httpx.TimeoutException, anthropic.APITimeoutError, openai.APITimeoutError)
+
 
 # Tokens per track (based on real-world testing, Feb 2026)
 TOKENS_PER_TRACK = 40
@@ -34,6 +36,7 @@ class LLMResponse:
     input_tokens: int
     output_tokens: int
     model: str
+    local: bool = False  # Ollama or a custom endpoint: no per-token cost
 
     @property
     def total_tokens(self) -> int:
@@ -42,6 +45,8 @@ class LLMResponse:
 
     def estimated_cost(self) -> float:
         """Estimate cost in USD based on token usage."""
+        if self.local:
+            return 0.0
         return estimate_cost_for_model(self.model, self.input_tokens, self.output_tokens)
 
 
@@ -78,17 +83,22 @@ class LLMClient:
         self.provider = config.provider
         self._client: Any = None
 
+        timeout = config.request_timeout
         if config.provider == "anthropic":
-            self._client = anthropic.Anthropic(api_key=config.api_key)
+            self._client = anthropic.Anthropic(api_key=config.api_key, timeout=timeout)
         elif config.provider == "openai":
-            self._client = openai.OpenAI(api_key=config.api_key)
+            self._client = openai.OpenAI(api_key=config.api_key, timeout=timeout)
         elif config.provider == "gemini":
-            self._client = genai.Client(api_key=config.api_key)
+            self._client = genai.Client(
+                api_key=config.api_key,
+                http_options=genai_types.HttpOptions(timeout=timeout * 1000),  # milliseconds
+            )
         elif config.provider == "custom":
             # Custom OpenAI-compatible endpoint
             self._client = openai.OpenAI(
                 api_key=config.api_key or "not-needed",  # Use configured key or placeholder
                 base_url=config.custom_url,
+                timeout=timeout,
             )
         # Note: Ollama uses httpx directly, no persistent client needed
 
@@ -218,16 +228,13 @@ class LLMClient:
         # All retries exhausted
         raise RuntimeError(f"Gemini API failed after {max_retries} attempts: {last_error}")
 
-    def _complete_ollama(
-        self, prompt: str, system: str, model: str, timeout: float = 600.0
-    ) -> LLMResponse:
+    def _complete_ollama(self, prompt: str, system: str, model: str) -> LLMResponse:
         """Make a completion request to Ollama.
 
         Args:
             prompt: User prompt
             system: System prompt
             model: Model name (e.g., "llama3:8b")
-            timeout: Request timeout in seconds (default 10 minutes for slow hardware)
 
         Returns:
             LLMResponse with content and token counts
@@ -235,7 +242,7 @@ class LLMClient:
         logger.info("Calling Ollama API with %d char prompt", len(prompt))
         ollama_url = self.config.ollama_url.rstrip("/")
 
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=self.config.request_timeout) as client:
             response = client.post(
                 f"{ollama_url}/api/generate",
                 json={
@@ -243,6 +250,9 @@ class LLMClient:
                     "prompt": prompt,
                     "system": system,
                     "stream": False,
+                    # Ollama otherwise uses its small default context and silently drops the
+                    # start of prompts sized for the model's full context window
+                    "options": {"num_ctx": self.config.ollama_context_window},
                 },
             )
             response.raise_for_status()
@@ -250,7 +260,8 @@ class LLMClient:
 
         logger.debug("Ollama response received")
 
-        content = data.get("response", "")
+        # Older Ollama versions put reasoning models' thinking inline
+        content = re.sub(r"<think>.*?</think>", "", data.get("response", ""), flags=re.DOTALL).strip()
         # Ollama returns token counts in the response
         # prompt_eval_count is input tokens, eval_count is output tokens
         input_tokens = data.get("prompt_eval_count", 0)
@@ -274,16 +285,33 @@ class LLMClient:
 
     def _complete(self, prompt: str, system: str, model: str) -> LLMResponse:
         """Make a completion request to the configured provider."""
-        if self.provider == "anthropic":
-            return self._complete_anthropic(prompt, system, model)
-        elif self.provider in ("openai", "custom"):
-            return self._complete_openai(prompt, system, model)
-        elif self.provider == "gemini":
-            return self._complete_gemini(prompt, system, model)
-        elif self.provider == "ollama":
-            return self._complete_ollama(prompt, system, model)
-        else:
+        complete = {
+            "anthropic": self._complete_anthropic,
+            "openai": self._complete_openai,
+            "custom": self._complete_openai,
+            "gemini": self._complete_gemini,
+            "ollama": self._complete_ollama,
+        }.get(self.provider)
+        if not complete:
             raise ValueError(f"Unknown provider: {self.provider}")
+        if not model:
+            # Otherwise the provider gets an empty model name and returns a cryptic error
+            raise RuntimeError("No AI model is set. Choose one in Settings.")
+        cloud_names = {"anthropic": "Anthropic", "openai": "OpenAI", "gemini": "Gemini"}
+        if self.provider in cloud_names and not self.config.api_key:
+            raise RuntimeError(f"No API key is set for {cloud_names[self.provider]}. Add one in Settings.")
+
+        try:
+            response = complete(prompt, system, model)
+        except _TIMEOUT_ERRORS as e:
+            seconds = self.config.request_timeout
+            waited = f"{seconds} seconds" if seconds < 120 else f"{seconds / 60:g} minutes"
+            raise RuntimeError(
+                f"The AI didn't respond within {waited}. Raise Request Timeout in "
+                "Settings, or send fewer tracks to the AI."
+            ) from e
+        response.local = self.provider in ("ollama", "custom")
+        return response
 
     def analyze(self, prompt: str, system: str) -> LLMResponse:
         """Use the analysis model for understanding tasks.

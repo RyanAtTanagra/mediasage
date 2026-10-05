@@ -22,7 +22,7 @@ class TestLLMClientInitialization:
 
         with patch("backend.llm_client.anthropic") as mock_anthropic:
             client = LLMClient(config)
-            mock_anthropic.Anthropic.assert_called_once_with(api_key="sk-ant-test-key")
+            mock_anthropic.Anthropic.assert_called_once_with(api_key="sk-ant-test-key", timeout=600)
             assert client.provider == "anthropic"
 
     def test_openai_client_init(self, mocker):
@@ -39,7 +39,7 @@ class TestLLMClientInitialization:
 
         with patch("backend.llm_client.openai") as mock_openai:
             client = LLMClient(config)
-            mock_openai.OpenAI.assert_called_once_with(api_key="sk-test-key")
+            mock_openai.OpenAI.assert_called_once_with(api_key="sk-test-key", timeout=600)
             assert client.provider == "openai"
 
     def test_invalid_api_key_anthropic(self, mocker):
@@ -299,6 +299,124 @@ class TestOllamaProvider:
             call_args = mock_client_instance.post.call_args
             assert "/api/generate" in call_args[0][0]
 
+    def _ollama_call(self, response_text, context_window=40960):
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(
+            provider="ollama", model_analysis="qwen3:8b", model_generation="qwen3:8b",
+            ollama_context_window=context_window,
+        )
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"response": response_text, "prompt_eval_count": 1, "eval_count": 1}
+        with patch("backend.llm_client.httpx.Client") as mock_httpx:
+            http = mock_httpx.return_value.__enter__.return_value
+            http.post.return_value = mock_response
+            result = LLMClient(config)._complete_ollama("prompt", "system", "qwen3:8b")
+        return result, http.post.call_args.kwargs["json"]
+
+    def test_ollama_uses_configured_timeout(self):
+        """The Ollama call waits as long as the configured request timeout (#25)."""
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(
+            provider="ollama", model_analysis="m", model_generation="m", request_timeout=1800,
+        )
+        with patch("backend.llm_client.httpx.Client") as mock_httpx:
+            http = mock_httpx.return_value.__enter__.return_value
+            http.post.return_value.json.return_value = {"response": "[]"}
+            LLMClient(config)._complete_ollama("prompt", "system", "m")
+
+        assert mock_httpx.call_args.kwargs["timeout"] == 1800
+
+    def test_timeout_explains_the_setting(self):
+        import httpx
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        for timeout, waited in [(90, "90 seconds"), (900, "15 minutes")]:
+            config = LLMConfig(provider="ollama", model_analysis="m", model_generation="m", request_timeout=timeout)
+            client = LLMClient(config)
+            with patch.object(client, "_complete_ollama", side_effect=httpx.ReadTimeout("timed out")):
+                with pytest.raises(RuntimeError, match=f"within {waited}. Raise Request Timeout"):
+                    client.analyze("prompt", "system")
+
+    def test_empty_model_gives_clear_error(self):
+        """An empty model name used to reach the provider as model= (#20)."""
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(provider="custom", custom_url="http://x/v1", model_analysis="", model_generation="")
+        with patch("backend.llm_client.openai"):
+            client = LLMClient(config)
+            with pytest.raises(RuntimeError, match="No AI model is set"):
+                client.generate("prompt", "system")
+            client._client.chat.completions.create.assert_not_called()
+
+    def test_missing_cloud_key_gives_clear_error(self):
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(provider="anthropic", api_key="", model_analysis="claude-sonnet-5-5",
+                           model_generation="claude-haiku-4-5")
+        with patch("backend.llm_client.anthropic"):
+            client = LLMClient(config)
+            with pytest.raises(RuntimeError, match="No API key is set for Anthropic. Add one in Settings."):
+                client.analyze("prompt", "system")
+            client._client.messages.create.assert_not_called()
+
+    def test_cloud_clients_use_configured_timeout(self):
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        def config(provider):
+            return LLMConfig(provider=provider, api_key="k", model_analysis="m",
+                             model_generation="m", request_timeout=900)
+
+        with patch("backend.llm_client.anthropic") as mock_anthropic:
+            LLMClient(config("anthropic"))
+        assert mock_anthropic.Anthropic.call_args.kwargs["timeout"] == 900
+
+        with patch("backend.llm_client.genai") as mock_genai:
+            LLMClient(config("gemini"))
+        assert mock_genai.Client.call_args.kwargs["http_options"].timeout == 900_000
+
+    def test_local_responses_cost_nothing(self):
+        """Ollama and custom endpoints showed the placeholder price for unknown models."""
+        from backend.llm_client import LLMClient, LLMResponse
+        from backend.models import LLMConfig
+
+        reply = LLMResponse(content="[]", input_tokens=100_000, output_tokens=10_000, model="qwen3:8b")
+        for provider in ("ollama", "custom"):
+            config = LLMConfig(provider=provider, model_analysis="qwen3:8b", model_generation="qwen3:8b")
+            client = LLMClient(config)
+            method = "_complete_ollama" if provider == "ollama" else "_complete_openai"
+            with patch.object(client, method, return_value=reply):
+                assert client.generate("prompt", "system").estimated_cost() == 0.0, provider
+
+    def test_cloud_responses_still_priced(self):
+        from backend.llm_client import LLMClient, LLMResponse
+        from backend.models import LLMConfig
+
+        config = LLMConfig(provider="gemini", api_key="k", model_analysis="gemini-3.5-flash-lite",
+                           model_generation="gemini-3.5-flash-lite")
+        reply = LLMResponse(content="[]", input_tokens=1_000_000, output_tokens=0, model="gemini-3.5-flash-lite")
+        with patch("backend.llm_client.genai"):
+            client = LLMClient(config)
+        with patch.object(client, "_complete_gemini", return_value=reply):
+            assert client.generate("prompt", "system").estimated_cost() == 0.30
+
+    def test_ollama_sends_context_window(self):
+        """Without num_ctx Ollama truncates prompts sized for the full context (#24)."""
+        _, body = self._ollama_call("[]", context_window=40960)
+        assert body["options"] == {"num_ctx": 40960}
+
+    def test_ollama_strips_inline_thinking(self):
+        """Older Ollama versions return a reasoning model's thinking inline."""
+        result, _ = self._ollama_call('<think>\nPicking tracks...\n</think>\n[{"title": "A"}]')
+        assert result.content == '[{"title": "A"}]'
+
     def test_complete_dispatch_routes_to_ollama(self, mocker):
         """Should route 'ollama' provider to _complete_ollama method."""
         from backend.llm_client import LLMClient
@@ -345,6 +463,7 @@ class TestCustomProvider:
             mock_openai.OpenAI.assert_called_once_with(
                 api_key="not-needed",
                 base_url="http://localhost:5000/v1",
+                timeout=600,
             )
             assert client.provider == "custom"
 

@@ -798,3 +798,54 @@ class TestReplaceLibrary:
         library_cache.replace_library(client("latest"), latest_switch)
 
         assert synced == ["latest"]
+
+
+class TestArtistFilters:
+    """Artist include/exclude filters and artist search (#9)."""
+
+    @pytest.fixture
+    def artist_db(self, initialized_db):
+        rows = [
+            ("1", "Creep", "Radiohead", "Pablo Honey", 1000, 1993, '["Rock"]'),
+            ("2", "Karma Police", "Radiohead", "OK Computer", 1000, 1997, '["Rock"]'),
+            ("3", "Glory Box", "Portishead", "Dummy", 1000, 1994, '["Trip Hop"]'),
+            ("4", "Teardrop", "Massive Attack", "Mezzanine", 1000, 1998, '["Trip Hop"]'),
+            ("5", "Live Forever", "Oasis", "Definitely Maybe", 1000, 1994, '["Rock"]'),
+        ]
+        conn = sqlite3.connect(str(initialized_db))
+        conn.executemany(
+            library_cache._INSERT_TRACK_SQL,
+            [r + (None, 0, "album", 0, None) for r in rows],
+        )
+        conn.execute("UPDATE sync_state SET track_count = 5 WHERE id = 1")
+        conn.commit()
+        conn.close()
+
+    def _keys(self, **filters):
+        return {t["rating_key"] for t in library_cache.get_tracks_by_filters(**filters)}
+
+    def test_include_artists_case_insensitive(self, artist_db):
+        assert self._keys(artists=["radiohead", "PORTISHEAD"]) == {"1", "2", "3"}
+        assert library_cache.count_tracks_by_filters(artists=["radiohead"]) == 2
+
+    def test_exclude_artists(self, artist_db):
+        assert self._keys(exclude_artists=["Radiohead"]) == {"3", "4", "5"}
+        assert library_cache.count_tracks_by_filters(exclude_artists=["Radiohead", "Oasis"]) == 2
+
+    def test_artists_combine_with_genres_and_decades(self, artist_db):
+        assert self._keys(artists=["Radiohead", "Oasis"], genres=["Rock"], decades=["1990s"]) == {"1", "2", "5"}
+        assert library_cache.count_tracks_by_filters(artists=["Portishead"], genres=["Rock"]) == 0
+
+    def test_limit_samples_within_artist(self, artist_db):
+        tracks = library_cache.get_tracks_by_filters(artists=["Radiohead"], limit=1)
+        assert len(tracks) == 1 and tracks[0]["artist"] == "Radiohead"
+
+    def test_search_artists_by_track_count(self, artist_db):
+        assert library_cache.search_artists("head") == [
+            {"name": "Radiohead", "count": 2},
+            {"name": "Portishead", "count": 1},
+        ]
+        assert len(library_cache.search_artists("")) == 4
+
+    def test_artist_names(self, artist_db):
+        assert set(library_cache.get_artist_names()) == {"Radiohead", "Portishead", "Massive Attack", "Oasis"}

@@ -107,7 +107,8 @@ class LLMConfig(BaseModel):
     """LLM provider settings."""
 
     provider: Literal["anthropic", "openai", "gemini", "ollama", "custom"]
-    api_key: str = ""  # Optional for local providers
+    api_key: str = ""  # The active provider's key; optional for local providers
+    api_keys: dict[str, str] = {}  # Keys saved in Settings, by provider (not from env vars)
     model_analysis: str
     model_generation: str
     smart_generation: bool = False
@@ -116,6 +117,14 @@ class LLMConfig(BaseModel):
     ollama_context_window: int = 32768  # Detected from model, can be overridden
     custom_url: str = ""
     custom_context_window: int = 32768
+    request_timeout: int = 600  # Seconds to wait for an AI response; local models can be slow
+
+    @field_validator("request_timeout")
+    @classmethod
+    def validate_request_timeout(cls, v: int) -> int:
+        if v < 30:
+            raise ValueError("Request timeout must be at least 30 seconds")
+        return v
 
     @field_validator("ollama_context_window", "custom_context_window")
     @classmethod
@@ -141,6 +150,7 @@ class AppConfig(BaseModel):
     jellyfin: JellyfinConfig = JellyfinConfig()
     llm: LLMConfig
     defaults: DefaultsConfig = DefaultsConfig()
+    library_sync_hours: float = Field(24, ge=0)  # Re-sync the cache once it's this old; 0 = never
 
 
 # =============================================================================
@@ -153,6 +163,13 @@ class GenreCount(BaseModel):
 
     name: str
     count: int | None = None
+
+
+class ArtistCount(BaseModel):
+    """Artist with track count."""
+
+    name: str
+    count: int
 
 
 class DecadeCount(BaseModel):
@@ -181,6 +198,7 @@ class AnalyzePromptResponse(BaseModel):
 
     suggested_genres: list[str]
     suggested_decades: list[str]
+    suggested_artists: list[str] = []  # Artists the prompt names that are in the library
     available_genres: list[GenreCount]
     available_decades: list[DecadeCount]
     reasoning: str
@@ -208,6 +226,8 @@ class FilterPreviewRequest(BaseModel):
 
     genres: list[str] = []
     decades: list[str] = []
+    artists: list[str] = []  # Only these artists
+    exclude_artists: list[str] = []
     track_count: int = 25
     max_tracks_to_ai: int = 500  # 0 = no limit
     min_rating: int = 0  # 0 = any, 2/4/6/8/10 = minimum rating (Plex uses 0-10)
@@ -240,6 +260,8 @@ class GenerateRequest(BaseModel):
     refinement_answers: list[str | None] | None = None
     genres: list[str]
     decades: list[str]
+    artists: list[str] = []  # Only these artists
+    exclude_artists: list[str] = []
     track_count: int = 25
     exclude_live: bool = True
     min_rating: int = 0  # 0 = any, 2/4/6/8/10 = minimum rating
@@ -428,6 +450,7 @@ class ConfigResponse(BaseModel):
     llm_provider: str
     llm_configured: bool
     llm_api_key_set: bool  # True if API key is configured (without revealing it)
+    api_key_providers: list[str] = []  # Providers with a key saved or set by environment variable
     model_analysis: str  # The analysis model being used
     model_generation: str  # The generation model being used
     max_tracks_to_ai: int  # Recommended max tracks for this model
@@ -442,10 +465,11 @@ class ConfigResponse(BaseModel):
     ollama_context_window: int = 32768
     custom_url: str = ""
     custom_context_window: int = 32768
+    request_timeout: int = 600
+    library_sync_hours: float = 24
     is_local_provider: bool = False
-    provider_from_env: bool = False  # True if LLM_PROVIDER env var is overriding UI
-    media_server_from_env: bool = False  # True if MEDIA_SERVER env var is overriding UI
-    models_from_env: bool = False  # True if LLM_MODEL_* env vars are overriding UI
+    # Settings fields set by environment variables (which override Settings), e.g. {"plex_url": "PLEX_URL"}
+    env_overrides: dict[str, str] = {}
     # Generation model's long-context pricing, if any
     long_context_threshold: int | None = None
     long_context_cost_per_million_input: float | None = None
@@ -472,6 +496,8 @@ class UpdateConfigRequest(BaseModel):
     ollama_context_window: int | None = None
     custom_url: str | None = None
     custom_context_window: int | None = None
+    request_timeout: int | None = None
+    library_sync_hours: float | None = Field(None, ge=0)
 
 
 class HealthResponse(BaseModel):
@@ -923,6 +949,8 @@ class ValidateAIRequest(BaseModel):
     api_key: str = ""
     ollama_url: str = ""
     custom_url: str = ""
+    custom_model: str = ""
+    ollama_model: str = ""
 
 
 class ValidateAIResponse(BaseModel):
