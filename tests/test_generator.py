@@ -534,3 +534,48 @@ class TestArtistFilter:
         assert "these artists, so every track is by them: Radiohead" in prompt
         system = llm.generate.call_args.args[1]
         assert "unless the user asked for specific artists" in system
+
+
+class TestNoMatches:
+    """When nothing the AI picked is in the library, say so instead of an empty playlist."""
+
+    @pytest.fixture(autouse=True)
+    def no_retry_delay(self, monkeypatch):
+        monkeypatch.setattr("backend.generator.NARRATIVE_RETRY_DELAY", 0)
+
+    def _run(self, monkeypatch, picks, narrative=None):
+        from backend import generator
+        from backend.llm_client import LLMResponse
+        from backend.models import Track
+
+        library = [Track(rating_key="1", title="Creep", artist="Radiohead", album="Pablo Honey", duration_ms=1)]
+        monkeypatch.setattr(generator, "_get_tracks_from_cache_or_plex", lambda *a, **k: library)
+        monkeypatch.setattr(generator.library_cache, "has_cached_tracks", lambda: True)
+        llm = MagicMock()
+        llm.generate.return_value = LLMResponse(content="[]", input_tokens=1, output_tokens=1, model="m")
+        llm.parse_json_response.side_effect = [picks, narrative or {}]
+        monkeypatch.setattr(generator, "get_llm_client", lambda: llm)
+        monkeypatch.setattr(generator, "get_current_media_client", lambda: MagicMock())
+        events = list(generator.generate_playlist_stream(prompt="rainy day", genres=[], decades=[]))
+        return events, llm
+
+    def test_no_matching_picks(self, monkeypatch):
+        events, llm = self._run(monkeypatch, [{"artist": "Nobody", "title": "Imaginary Song"}])
+
+        assert "event: error" in events[-1]
+        assert "None of the AI's 1 picks matched tracks in your library" in events[-1]
+        llm.analyze.assert_not_called()  # no title/story call for an empty playlist
+
+    def test_no_picks(self, monkeypatch):
+        events, _ = self._run(monkeypatch, [])
+        assert "The AI didn't pick any tracks" in events[-1]
+
+    def test_non_object_picks_are_skipped(self, monkeypatch):
+        events, _ = self._run(
+            monkeypatch,
+            ["Radiohead - Creep", {"artist": "Radiohead", "title": "Creep"}],
+            narrative={"title": "Rainy", "narrative": "Wet."},
+        )
+
+        complete = next(e for e in events if "event: complete" in e)
+        assert '"track_count": 1' in complete

@@ -301,6 +301,8 @@ def generate_playlist_stream(
         if not isinstance(track_selections, list):
             yield emit("error", {"message": "LLM returned invalid track selection format"})
             return
+        # Small models sometimes return plain strings instead of {"artist", "title"} objects
+        track_selections = [sel for sel in track_selections if isinstance(sel, dict)]
 
         # Step 6: Match tracks
         yield emit("progress", {"step": "matching", "message": f"Matching {len(track_selections)} selections to library..."})
@@ -330,6 +332,17 @@ def generate_playlist_stream(
                     if reason:
                         track_reasons[track.rating_key] = reason
                     break
+
+        if not matched_tracks:
+            if track_selections:
+                message = (
+                    f"None of the AI's {len(track_selections)} picks matched tracks in your library. "
+                    "The model probably made up track names; try again, or use a more capable model."
+                )
+            else:
+                message = "The AI didn't pick any tracks. Try again, or rephrase your request."
+            yield emit("error", {"message": message})
+            return
 
         # Step 7: Generate narrative
         yield emit("progress", {"step": "narrative", "message": "Writing playlist narrative..."})
