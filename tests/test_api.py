@@ -30,6 +30,10 @@ def create_mock_config(
 ):
     """Create a properly structured mock config."""
     mock = MagicMock()
+    mock.media_server = "plex"
+    mock.jellyfin.url = ""
+    mock.jellyfin.token = ""
+    mock.jellyfin.music_library = "Music"
     mock.plex.url = plex_url
     mock.plex.token = plex_token
     mock.plex.music_library = music_library
@@ -50,7 +54,7 @@ class TestHealthEndpoint:
     def test_health_check_returns_status(self, client):
         """Should return health status."""
         with patch("backend.main.get_config") as mock_config:
-            with patch("backend.main.get_plex_client") as mock_plex:
+            with patch("backend.main.get_current_media_client") as mock_plex:
                 mock_config.return_value = create_mock_config()
                 mock_plex.return_value = MagicMock(is_connected=MagicMock(return_value=True))
 
@@ -64,7 +68,7 @@ class TestHealthEndpoint:
     def test_health_check_shows_plex_status(self, client):
         """Should show Plex connection status."""
         with patch("backend.main.get_config") as mock_config:
-            with patch("backend.main.get_plex_client") as mock_plex:
+            with patch("backend.main.get_current_media_client") as mock_plex:
                 mock_config.return_value = create_mock_config()
                 mock_plex.return_value = MagicMock(is_connected=MagicMock(return_value=True))
 
@@ -78,7 +82,7 @@ class TestHealthEndpoint:
     def test_health_check_shows_llm_status(self, client):
         """Should show LLM configuration status."""
         with patch("backend.main.get_config") as mock_config:
-            with patch("backend.main.get_plex_client") as mock_plex:
+            with patch("backend.main.get_current_media_client") as mock_plex:
                 mock_config.return_value = create_mock_config(llm_api_key="key")
                 mock_plex.return_value = None  # No Plex client
 
@@ -337,3 +341,83 @@ class TestConfigLongContextPricing:
             data = client.get("/api/config").json()
 
         assert data["long_context_threshold"] is None
+
+
+class TestLibraryStatsJellyfin:
+    """Jellyfin stats come from the cache once synced (scanning Jellyfin takes about a minute)."""
+
+    def test_uses_cache_when_synced(self, client):
+        mock_config = create_mock_config()
+        mock_config.media_server = "jellyfin"
+        jellyfin = MagicMock(is_connected=MagicMock(return_value=True))
+        with patch("backend.main.get_config", return_value=mock_config), \
+             patch("backend.main.get_current_media_client", return_value=jellyfin), \
+             patch("backend.main.library_cache.has_cached_tracks", return_value=True), \
+             patch("backend.main.library_cache.get_sync_state", return_value={"track_count": 42}), \
+             patch("backend.main.library_cache.get_cached_genre_decade_stats",
+                   return_value={"genres": [{"name": "Jazz", "count": 42}], "decades": []}):
+            data = client.get("/api/library/stats").json()
+
+        assert data["total_tracks"] == 42
+        assert data["genres"] == [{"name": "Jazz", "count": 42}]
+        jellyfin.get_library_stats.assert_not_called()
+
+
+class TestMediaServerSwitch:
+    """Switching between Plex and Jellyfin replaces the cached library."""
+
+    def _post_config(self, client, previous, new, updates):
+        before = create_mock_config()
+        before.media_server = previous
+        after = create_mock_config()
+        after.media_server = new
+        with patch("backend.main.get_config", return_value=before), \
+             patch("backend.main.update_config_values", return_value=after), \
+             patch("backend.main.init_plex_client"), \
+             patch("backend.main.init_jellyfin_client"), \
+             patch("backend.main.get_current_media_client", return_value=None), \
+             patch("backend.main._resync_for_new_media_server") as resync:
+            response = client.post("/api/config", json=updates)
+        assert response.status_code == 200
+        return resync
+
+    def test_switching_server_resyncs(self, client):
+        resync = self._post_config(client, "jellyfin", "plex", {"media_server": "plex"})
+        resync.assert_called_once()
+
+    def test_saving_same_server_does_not_resync(self, client):
+        resync = self._post_config(client, "plex", "plex", {"media_server": "plex", "music_library": "Music"})
+        resync.assert_not_called()
+
+    def test_plex_setup_selects_plex_and_resyncs_from_jellyfin(self, client):
+        temp_client = MagicMock(is_connected=MagicMock(return_value=True))
+        temp_client.get_music_libraries.return_value = ["Music"]
+        temp_client._server.friendlyName = "My Plex Server"
+        previous = create_mock_config()
+        previous.media_server = "jellyfin"
+        with patch("backend.main.PlexClientInstance", return_value=temp_client), \
+             patch("backend.main.get_config", return_value=previous), \
+             patch("backend.main.update_config_values") as update, \
+             patch("backend.main.init_plex_client"), \
+             patch("backend.main._resync_for_new_media_server") as resync:
+            response = client.post("/api/setup/validate-plex", json={
+                "plex_url": "http://plex:32400", "plex_token": "abc", "music_library": "Music",
+            })
+
+        assert response.json()["success"] is True
+        assert update.call_args.args[0]["media_server"] == "plex"
+        resync.assert_called_once()
+
+    def test_resync_invalidates_now_and_replaces_in_background(self):
+        from backend.main import _resync_for_new_media_server
+
+        with patch("backend.main.library_cache") as cache, \
+             patch("backend.main.asyncio.to_thread", new=MagicMock()) as to_thread, \
+             patch("backend.main.asyncio.create_task"):
+            _resync_for_new_media_server()
+
+        cache.invalidate_cache.assert_called_once()
+        cache.clear_cache.assert_not_called()  # a running sync holds the DB; never block the request
+        to_thread.assert_called_once()
+        assert to_thread.call_args.args[0] is cache.replace_library
+        assert to_thread.call_args.args[2] == cache.invalidate_cache.return_value

@@ -40,6 +40,10 @@ def create_mock_config(**overrides):
     }
     defaults.update(overrides)
     mock = MagicMock()
+    mock.media_server = "plex"
+    mock.jellyfin.url = ""
+    mock.jellyfin.token = ""
+    mock.jellyfin.music_library = "Music"
     mock.plex.url = defaults["plex_url"]
     mock.plex.token = defaults["plex_token"]
     mock.plex.music_library = defaults["music_library"]

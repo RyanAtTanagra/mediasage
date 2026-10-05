@@ -15,6 +15,7 @@ from plexapi.server import PlexServer
 from requests.exceptions import ConnectionError, Timeout
 from unidecode import unidecode
 
+from backend.media_client import BaseMediaClient
 from backend.models import PlexClientInfo, PlexPlaylistInfo, Track
 
 logger = logging.getLogger(__name__)
@@ -164,7 +165,7 @@ def is_live_version(track: Any) -> bool:
     return False
 
 
-class PlexClient:
+class PlexClient(BaseMediaClient):
     """Client for interacting with Plex server."""
 
     # Cooldown between reconnection attempts (seconds)
@@ -638,6 +639,10 @@ class PlexClient:
             )
         except Exception:
             return None
+
+    def get_art_url(self, item_id: str) -> str | None:
+        """Relative Plex thumb path; main.py adds the server URL and token when proxying."""
+        return self.get_thumb_path(item_id)
 
     def create_playlist(
         self, name: str, rating_keys: list[str], description: str = ""

@@ -284,6 +284,13 @@ async function validatePlex(url, token, library) {
     });
 }
 
+async function validateJellyfin(url, token, library) {
+    return apiCall('/setup/validate-jellyfin', {
+        method: 'POST',
+        body: JSON.stringify({ jellyfin_url: url, jellyfin_token: token, music_library: library }),
+    });
+}
+
 async function validateAI(provider, apiKey, ollamaUrl, customUrl) {
     return apiCall('/setup/validate-ai', {
         method: 'POST',
@@ -500,7 +507,7 @@ async function createPlayQueue(ratingKeys, clientId, mode) {
 }
 
 async function fetchPlexPlaylists() {
-    return apiCall('/plex/playlists');
+    return apiCall(state.config?.media_server === 'jellyfin' ? '/jellyfin/playlists' : '/plex/playlists');
 }
 
 async function sendPlaylistUpdate(playlistId, ratingKeys, mode, description = '') {
@@ -1201,12 +1208,18 @@ function updateFilters() {
     // Update checkboxes
     document.getElementById('exclude-live').checked = state.excludeLive;
 
-    // Update rating buttons
-    document.querySelectorAll('.rating-btn').forEach(btn => {
-        const isActive = parseInt(btn.dataset.rating) === state.minRating;
-        btn.classList.toggle('active', isActive);
-        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-    });
+    // Jellyfin has no star ratings
+    const isJellyfin = state.config?.media_server === 'jellyfin';
+    document.getElementById('filter-rating-section').classList.toggle('hidden', isJellyfin);
+    if (isJellyfin) {
+        state.minRating = 0;
+    } else {
+        document.querySelectorAll('.rating-btn').forEach(btn => {
+            const isActive = parseInt(btn.dataset.rating) === state.minRating;
+            btn.classList.toggle('active', isActive);
+            btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        });
+    }
 }
 
 function updateModelSuggestion() {
@@ -1701,9 +1714,20 @@ function updateResultsFooter() {
 function updateSettings() {
     if (!state.config) return;
 
+    const mediaServer = state.config.media_server || 'plex';
+    document.getElementById('settings-media-server').value = mediaServer;
+    document.getElementById('media-server-env-warning').classList.toggle('hidden', !state.config.media_server_from_env);
+    showServerFields('settings', mediaServer);
+
     document.getElementById('plex-url').value = state.config.plex_url || '';
     document.getElementById('music-library').value = state.config.music_library || 'Music';
     document.getElementById('llm-provider').value = state.config.llm_provider || 'gemini';
+
+    document.getElementById('jellyfin-url').value = state.config.jellyfin_url || '';
+    document.getElementById('jellyfin-music-library').value = state.config.jellyfin_music_library || 'Music';
+    document.getElementById('jellyfin-token').placeholder = state.config.jellyfin_token_set
+        ? '•••••••••••••••• (configured)'
+        : 'Your Jellyfin API key';
 
     // Show warning if provider is set by environment variable
     const providerEnvWarning = document.getElementById('provider-env-warning');
@@ -1740,18 +1764,41 @@ function updateSettings() {
     customContext.value = state.config.custom_context_window || 32768;
 
     // Update status indicators
-    const plexStatus = document.getElementById('plex-status');
-    plexStatus.classList.toggle('connected', state.config.plex_connected);
-    plexStatus.querySelector('.status-text').textContent =
-        state.config.plex_connected ? 'Connected' : 'Not connected';
+    // plex_connected reports whichever server is active; the other one's fields are hidden
+    for (const id of ['plex-status', 'jellyfin-status']) {
+        const status = document.getElementById(id);
+        status.classList.toggle('connected', state.config.plex_connected);
+        status.querySelector('.status-text').textContent =
+            state.config.plex_connected ? 'Connected' : 'Not connected';
+    }
 
     const llmStatus = document.getElementById('llm-status');
     llmStatus.classList.toggle('connected', state.config.llm_configured);
     llmStatus.querySelector('.status-text').textContent =
         state.config.llm_configured ? 'Configured' : 'Not configured';
 
+    // setSaveMode() rebuilds the button; only the "new playlist" label names the server
+    if (state.saveMode === 'new') {
+        document.querySelector('#save-playlist-btn .btn-label-long').textContent = `Save to ${mediaServerLabel()}`;
+    }
+    // Play Now drives Plex players; Jellyfin has no equivalent here
+    document.getElementById('play-now-btn').style.display = mediaServer === 'jellyfin' ? 'none' : '';
+
     // Show provider-specific settings
     showProviderSettings(state.config.llm_provider);
+}
+
+function showServerFields(prefix, server) {
+    document.getElementById(`${prefix}-plex-fields`).classList.toggle('hidden', server === 'jellyfin');
+    document.getElementById(`${prefix}-jellyfin-fields`).classList.toggle('hidden', server !== 'jellyfin');
+}
+
+function isSetupServerConnected(status) {
+    return status.media_server === 'jellyfin' ? status.jellyfin_connected : status.plex_connected;
+}
+
+function mediaServerLabel() {
+    return state.config?.media_server === 'jellyfin' ? 'Jellyfin' : 'Plex';
 }
 
 function showProviderSettings(provider) {
@@ -2040,7 +2087,7 @@ function validateCustomContextInline() {
 }
 
 function updateConfigRequiredUI() {
-    const plexConnected = state.config?.plex_connected ?? false;
+    const serverConnected = state.config?.plex_connected ?? false;
     const llmConfigured = state.config?.llm_configured ?? false;
 
     // Elements that require configuration
@@ -2056,23 +2103,24 @@ function updateConfigRequiredUI() {
     const hintSeed = document.getElementById('llm-required-hint-seed');
 
     // Determine what's missing
-    const needsPlex = !plexConnected;
+    const needsServer = !serverConnected;
     const needsLLM = !llmConfigured;
-    const needsConfig = needsPlex || needsLLM;
+    const needsConfig = needsServer || needsLLM;
 
     // Update button/input states
     if (analyzeBtn) analyzeBtn.disabled = needsConfig;
     if (continueBtn) continueBtn.disabled = needsLLM; // Only needs LLM at this point
-    if (searchBtn) searchBtn.disabled = needsPlex;
-    if (searchInput) searchInput.disabled = needsPlex;
-    if (promptTextarea) promptTextarea.disabled = needsPlex;
+    if (searchBtn) searchBtn.disabled = needsServer;
+    if (searchInput) searchInput.disabled = needsServer;
+    if (promptTextarea) promptTextarea.disabled = needsServer;
 
     // Build hint message based on what's missing
+    const serverLabel = mediaServerLabel();
     let hintMessage = '';
-    if (needsPlex && needsLLM) {
-        hintMessage = '<a href="#" data-view="settings">Configure Plex and an LLM provider</a> to continue';
-    } else if (needsPlex) {
-        hintMessage = '<a href="#" data-view="settings">Connect to Plex</a> to continue';
+    if (needsServer && needsLLM) {
+        hintMessage = `<a href="#" data-view="settings">Configure ${serverLabel} and an LLM provider</a> to continue`;
+    } else if (needsServer) {
+        hintMessage = `<a href="#" data-view="settings">Connect to ${serverLabel}</a> to continue`;
     } else if (needsLLM) {
         hintMessage = '<a href="#" data-view="settings">Configure an LLM provider</a> to continue';
     }
@@ -2312,7 +2360,7 @@ function updateSyncProgress(phase, current, total) {
     } else if (phase === 'fetching') {
         // Indeterminate state - fetching tracks from Plex
         fill.style.width = '0%';
-        text.textContent = 'Fetching tracks from Plex...';
+        text.textContent = 'Fetching tracks from library...';
         if (bar) bar.setAttribute('aria-valuenow', '0');
     } else if (phase === 'processing') {
         // Processing phase - show progress
@@ -2759,6 +2807,11 @@ function setupEventListeners() {
     // Success modal - Start New Playlist
     document.getElementById('new-playlist-btn').addEventListener('click', hideSuccessModal);
 
+    // Media server selection change
+    document.getElementById('settings-media-server').addEventListener('change', (e) => {
+        showServerFields('settings', e.target.value);
+    });
+
     // Provider selection change
     document.getElementById('llm-provider').addEventListener('change', (e) => {
         showProviderSettings(e.target.value);
@@ -2983,7 +3036,7 @@ function renderSearchResults(tracks) {
 async function selectSeedTrack(ratingKey, tracks) {
     // Check if services are configured before proceeding
     if (!state.config?.plex_connected) {
-        showError('Connect to Plex in Settings first');
+        showError(`Connect to ${mediaServerLabel()} in Settings first`);
         return;
     }
     if (!state.config?.llm_configured) {
@@ -3229,12 +3282,13 @@ async function handleSavePlaylist() {
         return;
     }
 
+    const serverLabel = mediaServerLabel();
     const saveSteps = [
-        'Connecting to Plex server...',
+        `Connecting to ${serverLabel} server...`,
         'Creating playlist...',
         'Adding tracks...',
     ];
-    setLoading(true, 'Saving to Plex...', saveSteps);
+    setLoading(true, `Saving to ${serverLabel}...`, saveSteps);
 
     try {
         const ratingKeys = state.playlist.map(t => t.rating_key);
@@ -3273,36 +3327,40 @@ async function loadSettings() {
         updateFooter();
         updateConfigRequiredUI();
 
-        // Show library stats if connected
-        if (state.config.plex_connected) {
-            const statsSection = document.getElementById('library-stats-section');
-            statsSection.style.display = 'block';
-
-            try {
-                const stats = await fetchLibraryStats();
-                // Cache genre/decade data so other views don't need a separate fetch
-                state.availableGenres = stats.genres;
-                state.availableDecades = stats.decades;
-                document.getElementById('library-stats').innerHTML = `
-                    <p><strong>Total Tracks:</strong> ${stats.total_tracks.toLocaleString()}</p>
-                    <p><strong>Genres:</strong> ${stats.genres.length}</p>
-                    <p><strong>Decades:</strong> ${stats.decades.map(d => d.name).join(', ')}</p>
-                `;
-            } catch {
-                // Ignore library stats errors
-            }
-        }
+        // Not awaited: page load shouldn't wait on the Settings stats panel
+        if (state.config.plex_connected) loadLibraryStats();
     } catch (error) {
         showError('Failed to load settings: ' + error.message);
+    }
+}
+
+async function loadLibraryStats() {
+    document.getElementById('library-stats-section').style.display = 'block';
+    try {
+        const stats = await fetchLibraryStats();
+        // Cache genre/decade data so other views don't need a separate fetch
+        state.availableGenres = stats.genres;
+        state.availableDecades = stats.decades;
+        document.getElementById('library-stats').innerHTML = `
+            <p><strong>Total Tracks:</strong> ${stats.total_tracks.toLocaleString()}</p>
+            <p><strong>Genres:</strong> ${stats.genres.length}</p>
+            <p><strong>Decades:</strong> ${stats.decades.map(d => d.name).join(', ')}</p>
+        `;
+    } catch {
+        // Ignore library stats errors
     }
 }
 
 async function handleSaveSettings() {
     const updates = {};
 
+    const mediaServer = document.getElementById('settings-media-server').value;
     const plexUrl = document.getElementById('plex-url').value.trim();
     const plexToken = document.getElementById('plex-token').value.trim();
     const musicLibrary = document.getElementById('music-library').value.trim();
+    const jellyfinUrl = document.getElementById('jellyfin-url').value.trim();
+    const jellyfinToken = document.getElementById('jellyfin-token').value.trim();
+    const jellyfinMusicLibrary = document.getElementById('jellyfin-music-library').value.trim();
     const llmProvider = document.getElementById('llm-provider').value;
     const llmApiKey = document.getElementById('llm-api-key').value.trim();
 
@@ -3317,9 +3375,13 @@ async function handleSaveSettings() {
     const customModel = document.getElementById('custom-model').value.trim();
     const customContextWindow = parseInt(document.getElementById('custom-context-window').value) || 32768;
 
+    updates.media_server = mediaServer;
     if (plexUrl) updates.plex_url = plexUrl;
     if (plexToken) updates.plex_token = plexToken;
     if (musicLibrary) updates.music_library = musicLibrary;
+    if (jellyfinUrl) updates.jellyfin_url = jellyfinUrl;
+    if (jellyfinToken) updates.jellyfin_token = jellyfinToken;
+    if (jellyfinMusicLibrary) updates.jellyfin_music_library = jellyfinMusicLibrary;
     if (llmProvider) updates.llm_provider = llmProvider;
 
     // Set provider-specific settings
@@ -3370,6 +3432,7 @@ async function handleSaveSettings() {
 
         // Clear password fields after save
         document.getElementById('plex-token').value = '';
+        document.getElementById('jellyfin-token').value = '';
         document.getElementById('llm-api-key').value = '';
 
         // Reload library stats
@@ -3670,7 +3733,7 @@ function setSaveMode(mode) {
     const pickerContainer = document.getElementById('playlist-picker-container');
 
     if (mode === 'new') {
-        saveBtn.innerHTML = '<span class="btn-label-long">Save to Plex</span><span class="btn-label-short">Save</span>';
+        saveBtn.innerHTML = `<span class="btn-label-long">Save to ${mediaServerLabel()}</span><span class="btn-label-short">Save</span>`;
         nameContainer.classList.remove('hidden');
         pickerContainer.classList.add('hidden');
     } else if (mode === 'replace') {
@@ -5152,15 +5215,18 @@ function renderSetupState(status) {
         dataWarning.classList.add('hidden');
     }
 
-    // Step 1: Plex
-    if (status.plex_connected) {
-        setStepDone('plex', `Connected to Plex (${status.music_libraries.length} music ${status.music_libraries.length === 1 ? 'library' : 'libraries'})`);
+    // Step 1: Media server
+    const server = status.media_server || 'plex';
+    const isServerConnected = isSetupServerConnected(status);
+    if (isServerConnected) {
+        const serverLabel = server === 'jellyfin' ? 'Jellyfin' : 'Plex';
+        setStepDone('plex', `Connected to ${serverLabel} (${status.music_libraries.length} music ${status.music_libraries.length === 1 ? 'library' : 'libraries'})`);
     } else {
         setStepForm('plex');
-        if (status.plex_from_env) {
-            const urlInput = document.getElementById('setup-plex-url');
-            if (urlInput && !urlInput.value) urlInput.value = '';
-        }
+        document.querySelectorAll('input[name="setup-media-server"]').forEach(radio => {
+            radio.checked = radio.value === server;
+        });
+        showServerFields('setup', server);
     }
 
     // Step 2: AI
@@ -5180,7 +5246,7 @@ function renderSetupState(status) {
     } else if (status.is_syncing) {
         showSyncProgress(status);
         startSetupSyncPolling();
-    } else if (status.plex_connected && status.llm_configured) {
+    } else if (isServerConnected && status.llm_configured) {
         // Auto-trigger sync
         triggerSetupSync();
     } else {
@@ -5190,7 +5256,7 @@ function renderSetupState(status) {
     }
 
     // Step 4: Get Started
-    const allDone = status.plex_connected && status.llm_configured &&
+    const allDone = isServerConnected && status.llm_configured &&
         status.library_synced && !status.is_syncing;
     const getStartedBtn = document.getElementById('setup-get-started-btn');
     getStartedBtn.disabled = !allDone;
@@ -5316,38 +5382,49 @@ function setupWizardEventListeners() {
     if (_setupListenersAttached) return;
     _setupListenersAttached = true;
 
-    // Plex validation
-    document.getElementById('setup-plex-btn').addEventListener('click', async () => {
-        const url = document.getElementById('setup-plex-url').value.trim();
-        const token = document.getElementById('setup-plex-token').value.trim();
-        const library = document.getElementById('setup-plex-library').value.trim() || 'Music';
+    document.querySelectorAll('input[name="setup-media-server"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            showServerFields('setup', radio.value);
+        });
+    });
 
+    document.getElementById('setup-plex-btn').addEventListener('click', async () => {
+        const server = document.querySelector('input[name="setup-media-server"]:checked').value;
+        const isJellyfin = server === 'jellyfin';
+        const url = document.getElementById(`setup-${server}-url`).value.trim();
+        const token = document.getElementById(`setup-${server}-token`).value.trim();
+        const library = document.getElementById(`setup-${server}-library`).value.trim() || 'Music';
+        const btn = document.getElementById('setup-plex-btn');
+
+        clearStepError('plex');
         if (!url || !token) {
-            setStepError('plex', 'URL and token are required');
+            setStepError('plex', isJellyfin ? 'URL and API key are required' : 'URL and token are required');
             return;
         }
 
-        clearStepError('plex');
-        const btn = document.getElementById('setup-plex-btn');
         btn.disabled = true;
         btn.textContent = 'Connecting...';
 
         try {
-            const result = await validatePlex(url, token, library);
-            if (result.success) {
-                state.setup.status.plex_connected = true;
-                state.setup.status.music_libraries = result.music_libraries || [];
-                setStepDone('plex', result.server_name
-                    ? `Connected to ${result.server_name}` : 'Connected to Plex');
-                // Auto-trigger sync if AI is also done
-                if (state.setup.status.llm_configured && !state.setup.status.library_synced) {
-                    state.setup.status.is_syncing = true;
-                    triggerSetupSync();
-                }
-                renderSetupState(state.setup.status);
-            } else {
+            const result = isJellyfin
+                ? await validateJellyfin(url, token, library)
+                : await validatePlex(url, token, library);
+            if (!result.success) {
                 setStepError('plex', result.error || 'Connection failed');
+                return;
             }
+
+            state.setup.status[`${server}_connected`] = true;
+            state.setup.status.media_server = server;
+            state.setup.status.music_libraries = result.music_libraries || [];
+            setStepDone('plex', `Connected to ${result.server_name || (isJellyfin ? 'Jellyfin' : 'Plex')}`);
+
+            // Auto-trigger sync if AI is also done
+            if (state.setup.status.llm_configured && !state.setup.status.library_synced) {
+                state.setup.status.is_syncing = true;
+                triggerSetupSync();
+            }
+            renderSetupState(state.setup.status);
         } catch (e) {
             setStepError('plex', e.message);
         } finally {
@@ -5398,8 +5475,8 @@ function setupWizardEventListeners() {
                 state.setup.status.llm_configured = true;
                 state.setup.status.llm_provider = provider;
                 setStepDone('ai', `Using ${result.provider_name || provider}`);
-                // Auto-trigger sync if Plex is also done
-                if (state.setup.status.plex_connected && !state.setup.status.library_synced) {
+                // Auto-trigger sync if the media server is also done
+                if (isSetupServerConnected(state.setup.status) && !state.setup.status.library_synced) {
                     state.setup.status.is_syncing = true;
                     triggerSetupSync();
                 }

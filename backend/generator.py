@@ -7,7 +7,8 @@ from datetime import datetime
 
 from backend.llm_client import get_llm_client
 from backend.models import GenerateResponse, Track
-from backend.plex_client import PlexQueryError, get_plex_client
+from backend.plex_client import PlexQueryError
+from backend.config import get_current_media_client
 from backend import library_cache
 
 logger = logging.getLogger(__name__)
@@ -168,13 +169,13 @@ def generate_playlist_stream(
     try:
         logger.info("Starting playlist generation (streaming)")
         llm_client = get_llm_client()
-        plex_client = get_plex_client()
+        media_client = get_current_media_client()
 
         if not llm_client:
             yield emit("error", {"message": "LLM client not initialized"})
             return
-        if not plex_client:
-            yield emit("error", {"message": "Plex client not initialized"})
+        if not media_client:
+            yield emit("error", {"message": "Media server not connected"})
             return
 
         has_filters = genres or decades or min_rating > 0
@@ -192,7 +193,7 @@ def generate_playlist_stream(
                     genres, decades, min_rating, using_cache)
         try:
             filtered_tracks = _get_tracks_from_cache_or_plex(
-                plex_client=plex_client,
+                plex_client=media_client,
                 genres=genres,
                 decades=decades,
                 exclude_live=exclude_live,
