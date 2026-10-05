@@ -922,3 +922,20 @@ class TestCacheVersion:
         monkeypatch.setattr(library_cache, "_migration_applied", False)
         self._set(initialized_db, 0, 1)
         assert not library_cache.needs_resync()
+
+
+class TestHalfStarRatings:
+    """Minimum rating accepts half stars (Plex 0-10 scale, half star = 1) (#13)."""
+
+    def test_half_star_minimum(self, initialized_db):
+        conn = sqlite3.connect(str(initialized_db))
+        rows = [(str(i), f"T{i}", "A", "B", 1, 2000, "[]", rating) for i, rating in enumerate([1, 6, 7, 8, 10])]
+        conn.executemany(library_cache._INSERT_TRACK_SQL, [r + (0, "x", 0, None) for r in rows])
+        conn.execute("UPDATE sync_state SET track_count = 5 WHERE id = 1")
+        conn.commit()
+        conn.close()
+
+        assert library_cache.count_tracks_by_filters(min_rating=1) == 5   # half a star and up
+        assert library_cache.count_tracks_by_filters(min_rating=7) == 3   # 3.5 stars and up
+        assert library_cache.count_tracks_by_filters(min_rating=8) == 2
+        assert library_cache.count_tracks_by_filters(min_rating=10) == 1  # five stars only

@@ -97,7 +97,7 @@ const state = {
     trackCount: 25,
     excludeLive: true,
     maxTracksToAI: 500,  // 0 = no limit
-    minRating: 0,  // 0 = any, 2/4/6/8 = 1/2/3/4 stars minimum
+    minRating: 0,  // Plex 0-10 scale: 0 = any, 1 = half a star ... 10 = five stars
 
     // Results
     playlist: [],
@@ -1290,13 +1290,8 @@ function updateFilters() {
     document.getElementById('filter-rating-section').classList.toggle('hidden', isJellyfin);
     if (isJellyfin) {
         state.minRating = 0;
-    } else {
-        document.querySelectorAll('.rating-btn').forEach(btn => {
-            const isActive = parseInt(btn.dataset.rating) === state.minRating;
-            btn.classList.toggle('active', isActive);
-            btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-        });
     }
+    document.getElementById('min-rating').value = String(state.minRating);
 }
 
 function updateModelSuggestion() {
@@ -2886,13 +2881,9 @@ function setupEventListeners() {
         updateFilterPreview();
     });
 
-    // Minimum rating buttons
-    document.querySelectorAll('.rating-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            state.minRating = parseInt(btn.dataset.rating);
-            updateFilters();
-            updateFilterPreview();
-        });
+    document.getElementById('min-rating').addEventListener('change', (e) => {
+        state.minRating = parseInt(e.target.value);
+        updateFilterPreview();
     });
 
     // Generate playlist
