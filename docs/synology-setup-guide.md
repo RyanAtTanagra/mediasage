@@ -111,6 +111,8 @@ docker/
 1. On your computer, open a text editor (Notepad on Windows, TextEdit on Mac set to plain text)
 2. Paste the following — you'll replace the values in angle brackets `< >` with your own:
 
+> **The `environment` lines are optional.** You can delete them (and the `environment:` line) and enter your Plex and AI details in the setup wizard the first time you open MediaSage instead. Settings saved there are kept in the `data` folder. If you do set them here, they take priority over Settings, and the matching fields in Settings are locked.
+
 ```yaml
 services:
   mediasage:
@@ -246,9 +248,9 @@ If you prefer the GUI to editing a compose file, use this method.
 2. Browse to the `docker/mediasage/data` folder you created
 3. Set the **Mount Path** to `/app/data`
 
-#### Step 6: Add environment variables
+#### Step 6: Add environment variables (optional)
 
-Under **Environment**, add these three variables:
+You can skip this step and enter these details in the setup wizard when you first open MediaSage. If you add them here, they take priority over Settings. Under **Environment**, add these three variables:
 
 | Variable Name | Value |
 |---|---|
@@ -289,7 +291,7 @@ You can find your Synology's IP address in several ways:
 
 ## First-Time Setup
 
-When you first open MediaSage, it syncs your Plex music library. This builds a local index so the app can work with your tracks quickly.
+When you first open MediaSage, a setup wizard connects to Plex (or Jellyfin) and your AI provider; steps you already configured with environment variables are filled in. It then syncs your music library, which builds a local index so the app can work with your tracks quickly.
 
 1. **Library sync starts automatically.** A progress bar shows while it scans your library. This takes about 1-2 minutes for a typical library (subsequent visits are faster since the cache is stored in the `data` folder).
 
@@ -297,7 +299,7 @@ When you first open MediaSage, it syncs your Plex music library. This builds a l
    - **Plex Connection:** Green status showing your library name and track count
    - **LLM Provider:** Green status showing Gemini is configured
 
-If either shows red or unconfigured, verify your environment variables (see [Troubleshooting](#troubleshooting)).
+If either shows red or unconfigured, check the details in Settings, or your environment variables if you set them (see [Troubleshooting](#troubleshooting)).
 
 ---
 
@@ -453,7 +455,9 @@ MediaSage works with several AI providers. Gemini is the default because it's fr
 | **OpenAI** | `OPENAI_API_KEY` | ~$0.01-0.20/playlist | Handles ~23,000 tracks. |
 | **Anthropic Claude** | `ANTHROPIC_API_KEY` | ~$0.15-1.00/playlist | Handles ~4,400 tracks with Haiku, ~22,000 with Sonnet. Nuanced taste. |
 
-Add the appropriate environment variable to your container. MediaSage auto-detects which provider to use based on which key is set. If you set multiple keys, it defaults to Gemini; set `LLM_PROVIDER` explicitly to choose (e.g., `LLM_PROVIDER=openai`).
+The simplest way to switch is **Settings → LLM Provider**: pick the provider, paste its key and save. Each provider keeps its own key, so you can switch back and forth.
+
+Or add the appropriate environment variable to your container. MediaSage auto-detects which provider to use based on which key is set. If you set multiple keys, it defaults to Gemini; set `LLM_PROVIDER` explicitly to choose (e.g., `LLM_PROVIDER=openai`).
 
 ---
 

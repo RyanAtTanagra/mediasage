@@ -230,7 +230,7 @@ class FilterPreviewRequest(BaseModel):
     exclude_artists: list[str] = []
     track_count: int = 25
     max_tracks_to_ai: int = 500  # 0 = no limit
-    min_rating: int = 0  # 0 = any, 2/4/6/8/10 = minimum rating (Plex uses 0-10)
+    min_rating: int = Field(0, ge=0, le=10)  # Plex 0-10 scale (half star = 1); 0 = any
     exclude_live: bool = True
 
 
@@ -264,7 +264,7 @@ class GenerateRequest(BaseModel):
     exclude_artists: list[str] = []
     track_count: int = 25
     exclude_live: bool = True
-    min_rating: int = 0  # 0 = any, 2/4/6/8/10 = minimum rating
+    min_rating: int = Field(0, ge=0, le=10)  # Plex 0-10 scale (half star = 1); 0 = any
     max_tracks_to_ai: int = 500  # 0 = no limit
 
     @model_validator(mode="after")

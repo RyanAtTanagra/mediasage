@@ -422,14 +422,21 @@
                         </div>
 
                         <div class="filter-section" id="filter-rating-section">
-                            <h3>Minimum Rating</h3>
-                            <div class="rating-selector" role="group" aria-label="Minimum track rating">
-                                <button class="rating-btn active" data-rating="0" aria-pressed="true">Any</button>
-                                <button class="rating-btn" data-rating="2" aria-pressed="false">★+</button>
-                                <button class="rating-btn" data-rating="4" aria-pressed="false">★★+</button>
-                                <button class="rating-btn" data-rating="6" aria-pressed="false">★★★+</button>
-                                <button class="rating-btn" data-rating="8" aria-pressed="false">★★★★+</button>
-                            </div>
+                            <h3><label for="min-rating">Minimum Rating</label></h3>
+                            <!-- Plex rates 0-10: each star is 2, each half star 1 -->
+                            <select id="min-rating" class="rating-select">
+                                <option value="0">Any rating</option>
+                                <option value="1">½★ and up</option>
+                                <option value="2">★ and up</option>
+                                <option value="3">★½ and up</option>
+                                <option value="4">★★ and up</option>
+                                <option value="5">★★½ and up</option>
+                                <option value="6">★★★ and up</option>
+                                <option value="7">★★★½ and up</option>
+                                <option value="8">★★★★ and up</option>
+                                <option value="9">★★★★½ and up</option>
+                                <option value="10">★★★★★ only</option>
+                            </select>
                         </div>
 
                         <div class="filter-section">

@@ -344,7 +344,7 @@ class TestConfigLongContextPricing:
 
 
 class TestLibraryStatsJellyfin:
-    """Jellyfin stats come from the cache once synced (scanning Jellyfin takes about a minute)."""
+    """Library stats come from the cache once synced, matching the filters (#30)."""
 
     def test_uses_cache_when_synced(self, client):
         mock_config = create_mock_config()

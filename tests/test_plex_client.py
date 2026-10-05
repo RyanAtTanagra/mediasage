@@ -727,78 +727,71 @@ class TestPlexClientPlayQueue:
             mock_play_queue, protocol="https", address="plex.example.com", port="443"
         )
 
-    def test_play_queue_play_next_mode(self):
-        """Should add tracks to existing queue in reversed order with playNext=True."""
+    class FakeQueueItem:
+        def __init__(self, rating_key, item_id):
+            self.ratingKey = rating_key
+            self.playQueueItemID = item_id
+
+    class FakePlayQueue:
+        """Behaves like a Plex play queue: add appends, moveItem reorders."""
+
+        def __init__(self, rating_keys, current_index=0):
+            self.items = [TestPlexClientPlayQueue.FakeQueueItem(k, i) for i, k in enumerate(rating_keys)]
+            self.selectedItem = self.items[current_index]
+            self._next_id = len(self.items)
+
+        def addItem(self, track, playNext=False, refresh=True):
+            self.items.append(TestPlexClientPlayQueue.FakeQueueItem(track.ratingKey, self._next_id))
+            self._next_id += 1
+
+        def refresh(self):
+            pass
+
+        def moveItem(self, item, after=None, refresh=True):
+            self.items.remove(item)
+            self.items.insert(self.items.index(after) + 1 if after else 0, item)
+
+        def order(self):
+            return [item.ratingKey for item in self.items]
+
+    def _play_next(self, queue, rating_keys):
         from backend.plex_client import PlexClient
 
-        # Set up mock tracks
-        mock_track1 = MagicMock()
-        mock_track1.ratingKey = 201
-        mock_track2 = MagicMock()
-        mock_track2.ratingKey = 202
-        mock_track3 = MagicMock()
-        mock_track3.ratingKey = 203
-
-        # Set up mock client with active play queue
-        target_client = self._make_mock_client(
-            machine_id="target2",
-            title="Desktop Player",
-            product="Plex for Mac",
-        )
-        # timelines() returns list of timeline entries; music entry has playQueueID
-        music_entry = MagicMock()
-        music_entry.type = "music"
-        music_entry.playQueueID = 42
-        target_client.timelines.return_value = [music_entry]
-
-        mock_play_queue = MagicMock()
-
+        tracks = {int(k): MagicMock(ratingKey=int(k)) for k in rating_keys}
+        target_client = self._make_mock_client(machine_id="target2", title="Desktop Player", product="Plexamp")
+        target_client.timelines.return_value = [MagicMock(type="music", playQueueID=42)]
         mock_server = MagicMock()
-        mock_server.library.section.return_value = MagicMock()
         mock_server.clients.return_value = [target_client]
-        mock_server.fetchItem.side_effect = lambda key: {
-            201: mock_track1,
-            202: mock_track2,
-            203: mock_track3,
-        }[key]
+        mock_server.fetchItem.side_effect = lambda key: tracks[key]
 
-        with patch("backend.plex_client.PlexServer", return_value=mock_server):
-            with patch("backend.plex_client.PlayQueue") as MockPlayQueue:
-                MockPlayQueue.get.return_value = mock_play_queue
+        with patch("backend.plex_client.PlexServer", return_value=mock_server), \
+             patch("backend.plex_client.PlayQueue") as MockPlayQueue:
+            MockPlayQueue.get.return_value = queue
+            plex = PlexClient("http://localhost:32400", "token", "Music")
+            result = plex.play_queue(rating_keys=rating_keys, client_id="target2", mode="play_next")
+        return result, target_client, MockPlayQueue
 
-                plex = PlexClient("http://localhost:32400", "token", "Music")
-                result = plex.play_queue(
-                    rating_keys=["201", "202", "203"],
-                    client_id="target2",
-                    mode="play_next",
-                )
+    def test_play_queue_play_next_mode(self):
+        """New tracks go right after the current one, in order, ahead of the existing up next (#27)."""
+        queue = self.FakePlayQueue([100, 101, 102, 103], current_index=1)
 
-        # Verify proxyThroughServer was called
+        result, target_client, MockPlayQueue = self._play_next(queue, ["201", "202", "203"])
+
+        assert queue.order() == [100, 101, 201, 202, 203, 102, 103]
+        assert MockPlayQueue.get.call_args.args[1] == 42
         target_client.proxyThroughServer.assert_called_once()
-
-        # Verify PlayQueue.get was called with correct playQueueID
-        MockPlayQueue.get.assert_called_once()
-        get_call = MockPlayQueue.get.call_args
-        assert get_call[0][1] == 42 or get_call[1].get("playQueueID") == 42 or get_call.args[1] == 42
-
-        # Verify tracks were added in reversed order with playNext=True, refresh=True
-        add_calls = mock_play_queue.addItem.call_args_list
-        assert len(add_calls) == 3
-        # Reversed order: track3, track2, track1
-        assert add_calls[0][0][0] == mock_track3
-        assert add_calls[1][0][0] == mock_track2
-        assert add_calls[2][0][0] == mock_track1
-        # Each call should have playNext=True; only last call has refresh=True
-        for i, call in enumerate(add_calls):
-            assert call[1].get("playNext") is True
-            expected_refresh = (i == len(add_calls) - 1)
-            assert call[1].get("refresh") is expected_refresh
-
-        # Verify return values
+        target_client.refreshPlayQueue.assert_called_once_with(42, mtype="music")
         assert result["success"] is True
-        assert result["client_name"] == "Desktop Player"
-        assert result["client_product"] == "Plex for Mac"
         assert result["tracks_queued"] == 3
+        assert result["client_name"] == "Desktop Player"
+
+    def test_play_next_with_track_already_in_queue(self):
+        """A track already further down the queue is queued again next, not moved from there."""
+        queue = self.FakePlayQueue([100, 101, 202], current_index=0)
+
+        self._play_next(queue, ["202", "203"])
+
+        assert queue.order() == [100, 202, 203, 101, 202]
 
     def test_play_queue_offline_client(self):
         """Should return success=False with error when client is offline."""

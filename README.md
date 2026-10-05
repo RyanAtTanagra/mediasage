@@ -104,7 +104,7 @@ Describe a mood or moment, answer two quick questions about your preferences, an
 ### Smart Filtering
 
 Before the AI sees anything, you control the pool:
-- **Genres** — Select from your library's actual genre tags
+- **Genres** — Select from your library's actual genre tags (for Plex, album, artist and track genres combined, so genres you curate on artists count)
 - **Decades** — Filter by era
 - **Artists** — Only include, or leave out, specific artists. Ask for "a Radiohead playlist" and the artist filter is filled in for you (matched on album artist, so tracks on "Various Artists" compilations aren't included)
 - **Minimum rating** — Only tracks rated 3+, 4+, etc. (Plex only; Jellyfin has no star ratings)

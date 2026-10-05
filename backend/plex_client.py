@@ -323,6 +323,19 @@ class PlexClient(BaseMediaClient):
             logger.exception("Failed to get album metadata: %s", e)
             return {}
 
+    def get_all_artist_genres(self) -> dict[str, list[str]]:
+        """Map each artist's rating key to its genres (where people usually curate their own)."""
+        if not self._library:
+            return {}
+        try:
+            return {
+                str(artist.ratingKey): [g.tag for g in artist.genres]
+                for artist in self._library.search(libtype="artist")
+            }
+        except Exception:
+            logger.exception("Failed to get artist genres")
+            return {}
+
     def get_library_stats(self) -> dict[str, Any]:
         """Get statistics about the music library.
 
@@ -1113,16 +1126,12 @@ class PlexClient(BaseMediaClient):
                 existing_queue = PlayQueue.get(
                     self._server, play_queue_id, own=True
                 )
-                # Add in reverse order so tracks play in intended order
-                tracks_queued = 0
-                reversed_tracks = list(reversed(tracks))
-                for i, track in enumerate(reversed_tracks):
-                    try:
-                        is_last = i == len(reversed_tracks) - 1
-                        existing_queue.addItem(track, playNext=True, refresh=is_last)
-                        tracks_queued += 1
-                    except Exception:
-                        logger.warning("Failed to add track %s to queue", track.ratingKey)
+                tracks_queued = self._queue_next(existing_queue, tracks)
+                # Plexamp keeps its own copy of the queue and won't show the change otherwise
+                try:
+                    target_client.refreshPlayQueue(play_queue_id, mtype="music")
+                except Exception as e:
+                    logger.warning("Failed to refresh play queue on client %s: %s", client_id, e)
 
             else:
                 return {"success": False, "error": f"Unknown play queue mode: {mode}"}
@@ -1143,6 +1152,43 @@ class PlexClient(BaseMediaClient):
         except Exception as e:
             logger.exception("Failed to create play queue on '%s'", target_client.title)
             return {"success": False, "error": str(e)}
+
+    def _queue_next(self, queue: PlayQueue, tracks: list[Any]) -> int:
+        """Insert tracks, in order, right after the currently playing item.
+
+        Adding with playNext=True alone doesn't reliably land after the current item in
+        Plexamp, so add the tracks and then move each one into place.
+
+        Returns:
+            Number of tracks added
+        """
+        existing_ids = {item.playQueueItemID for item in queue.items}
+        added = 0
+        for track in tracks:
+            try:
+                queue.addItem(track, refresh=False)
+                added += 1
+            except Exception:
+                logger.warning("Failed to add track %s to queue", track.ratingKey)
+
+        queue.refresh()
+        new_items = [item for item in queue.items if item.playQueueItemID not in existing_ids]
+        # Queue entries in the order the tracks were requested (a track can appear twice)
+        ordered, used_ids = [], set()
+        for track in tracks:
+            match = next(
+                (i for i in new_items if i.ratingKey == track.ratingKey and i.playQueueItemID not in used_ids),
+                None,
+            )
+            if match:
+                ordered.append(match)
+                used_ids.add(match.playQueueItemID)
+
+        anchor = queue.selectedItem
+        for item in ordered:
+            queue.moveItem(item, after=anchor, refresh=False)
+            anchor = item
+        return added
 
     def _convert_track(self, plex_track: Any) -> Track:
         """Convert a Plex track object to our Track model."""

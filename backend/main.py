@@ -761,8 +761,8 @@ async def get_library_stats() -> LibraryStatsResponse:
     if not media_client or not media_client.is_connected():
         raise HTTPException(status_code=503, detail="Media server not connected")
 
-    # Jellyfin can only count genres by scanning every track (about a minute), so use the cache once synced
-    if get_config().media_server == "jellyfin" and library_cache.has_cached_tracks():
+    # The cache has the same genres the filters use, and is instant (Jellyfin's live stats scan every track)
+    if library_cache.has_cached_tracks():
         stats = await asyncio.to_thread(library_cache.get_cached_genre_decade_stats)
         stats["total_tracks"] = library_cache.get_sync_state()["track_count"]
     else:
