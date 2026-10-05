@@ -742,6 +742,7 @@ class TestEnvApiKeyNotSaved:
         current = config_module.AppConfig(
             plex=config_module.PlexConfig(url="", token=""),
             llm=config_module.LLMConfig(provider="gemini", api_key="saved-gemini-key",
+                                        api_keys={"gemini": "saved-gemini-key"},
                                         model_analysis="m", model_generation="m"),
         )
         monkeypatch.setattr(config_module, "_config", current)
@@ -755,12 +756,79 @@ class TestEnvApiKeyNotSaved:
         config = config_module.update_config_values({"llm_provider": "anthropic"})
 
         assert config.llm.api_key == "env-anthropic-key"
-        assert "api_key" not in saved["llm"]
+        assert "env-anthropic-key" not in saved["llm"]["api_keys"].values()
 
     def test_entered_key_is_saved(self, saved, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "env-anthropic-key")
 
         config = config_module.update_config_values({"llm_provider": "anthropic", "llm_api_key": "typed-key"})
 
-        assert config.llm.api_key == "typed-key"
-        assert saved["llm"]["api_key"] == "typed-key"
+        assert saved["llm"]["api_keys"]["anthropic"] == "typed-key"
+        assert config.llm.api_key == "env-anthropic-key"  # a set variable overrides Settings
+
+
+class TestPerProviderApiKeys:
+    """Each AI provider keeps its own key, so switching never sends another provider's key."""
+
+    ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "CUSTOM_LLM_API_KEY", "LLM_PROVIDER")
+
+    @pytest.fixture
+    def saved(self, monkeypatch):
+        for var in self.ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+        current = config_module.AppConfig(
+            plex=config_module.PlexConfig(url="", token=""),
+            llm=config_module.LLMConfig(provider="gemini", api_key="gemini-key", api_keys={"gemini": "gemini-key"},
+                                        model_analysis="m", model_generation="m"),
+        )
+        monkeypatch.setattr(config_module, "_config", current)
+        written = {}
+        monkeypatch.setattr(config_module, "save_user_config", lambda u: written.update(u))
+        return written
+
+    def test_switching_without_a_key_does_not_reuse_another_providers_key(self, saved):
+        config = config_module.update_config_values({"llm_provider": "anthropic"})
+
+        assert config.llm.provider == "anthropic"
+        assert config.llm.api_key == ""  # shows "Not configured" instead of sending the Gemini key
+
+    def test_each_provider_keeps_its_key(self, saved):
+        config_module.update_config_values({"llm_provider": "anthropic", "llm_api_key": "anthropic-key"})
+        config = config_module.update_config_values({"llm_provider": "gemini"})
+
+        assert config.llm.api_key == "gemini-key"
+        config = config_module.update_config_values({"llm_provider": "anthropic"})
+        assert config.llm.api_key == "anthropic-key"
+        assert saved["llm"]["api_keys"] == {"gemini": "gemini-key", "anthropic": "anthropic-key"}
+
+    def _load(self, tmp_path, monkeypatch, llm_yaml, **env):
+        for var in self.ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+        for var, value in env.items():
+            monkeypatch.setenv(var, value)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+        with patch("backend.config.load_user_yaml_config", return_value={"llm": llm_yaml}):
+            return load_config(config_file).llm
+
+    def test_older_single_key_belongs_to_its_provider(self, tmp_path, monkeypatch):
+        llm = self._load(tmp_path, monkeypatch, {"provider": "gemini", "api_key": "gemini-key"})
+        assert (llm.provider, llm.api_key, llm.api_keys) == ("gemini", "gemini-key", {"gemini": "gemini-key"})
+
+    def test_older_single_key_not_used_for_another_provider(self, tmp_path, monkeypatch):
+        """Anthropic used to pick up the saved key whatever provider it was saved for."""
+        llm = self._load(tmp_path, monkeypatch, {"provider": "gemini", "api_key": "gemini-key"},
+                         LLM_PROVIDER="anthropic")
+        assert (llm.provider, llm.api_key) == ("anthropic", "")
+
+    def test_loads_per_provider_keys(self, tmp_path, monkeypatch):
+        llm = self._load(tmp_path, monkeypatch, {
+            "provider": "anthropic", "api_keys": {"gemini": "g", "anthropic": "a"},
+        })
+        assert llm.api_key == "a"
+
+    def test_env_key_wins_for_its_provider(self, tmp_path, monkeypatch):
+        llm = self._load(tmp_path, monkeypatch, {"provider": "anthropic", "api_keys": {"anthropic": "saved"}},
+                         ANTHROPIC_API_KEY="from-env")
+        assert llm.api_key == "from-env"
+        assert llm.api_keys == {"anthropic": "saved"}

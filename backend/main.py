@@ -24,6 +24,7 @@ from backend.config import (
     get_config,
     get_current_media_client,
     load_user_yaml_config,
+    provider_api_key,
     save_user_config,
     update_config_values,
 )
@@ -238,6 +239,9 @@ def _build_config_response(config, media_client) -> ConfigResponse:
         llm_provider=config.llm.provider,
         llm_configured=_is_llm_configured(config),
         llm_api_key_set=bool(config.llm.api_key),
+        api_key_providers=[
+            p for p in ("anthropic", "openai", "gemini", "custom") if provider_api_key(p, config.llm.api_keys)
+        ],
         model_analysis=analysis_model,
         model_generation=generation_model,
         max_tracks_to_ai=max_tracks,

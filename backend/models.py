@@ -107,7 +107,8 @@ class LLMConfig(BaseModel):
     """LLM provider settings."""
 
     provider: Literal["anthropic", "openai", "gemini", "ollama", "custom"]
-    api_key: str = ""  # Optional for local providers
+    api_key: str = ""  # The active provider's key; optional for local providers
+    api_keys: dict[str, str] = {}  # Keys saved in Settings, by provider (not from env vars)
     model_analysis: str
     model_generation: str
     smart_generation: bool = False
@@ -449,6 +450,7 @@ class ConfigResponse(BaseModel):
     llm_provider: str
     llm_configured: bool
     llm_api_key_set: bool  # True if API key is configured (without revealing it)
+    api_key_providers: list[str] = []  # Providers with a key saved or set by environment variable
     model_analysis: str  # The analysis model being used
     model_generation: str  # The generation model being used
     max_tracks_to_ai: int  # Recommended max tracks for this model

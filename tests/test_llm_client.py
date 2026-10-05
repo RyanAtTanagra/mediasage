@@ -354,6 +354,18 @@ class TestOllamaProvider:
                 client.generate("prompt", "system")
             client._client.chat.completions.create.assert_not_called()
 
+    def test_missing_cloud_key_gives_clear_error(self):
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(provider="anthropic", api_key="", model_analysis="claude-sonnet-5-5",
+                           model_generation="claude-haiku-4-5")
+        with patch("backend.llm_client.anthropic"):
+            client = LLMClient(config)
+            with pytest.raises(RuntimeError, match="No API key is set for Anthropic. Add one in Settings."):
+                client.analyze("prompt", "system")
+            client._client.messages.create.assert_not_called()
+
     def test_cloud_clients_use_configured_timeout(self):
         from backend.llm_client import LLMClient
         from backend.models import LLMConfig

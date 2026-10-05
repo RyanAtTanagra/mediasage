@@ -297,6 +297,9 @@ class LLMClient:
         if not model:
             # Otherwise the provider gets an empty model name and returns a cryptic error
             raise RuntimeError("No AI model is set. Choose one in Settings.")
+        cloud_names = {"anthropic": "Anthropic", "openai": "OpenAI", "gemini": "Gemini"}
+        if self.provider in cloud_names and not self.config.api_key:
+            raise RuntimeError(f"No API key is set for {cloud_names[self.provider]}. Add one in Settings.")
 
         try:
             response = complete(prompt, system, model)

@@ -490,3 +490,17 @@ class TestLibraryFreshness:
         cache, to_thread = self._run(hours=0)
         cache.is_cache_stale.assert_not_called()
         to_thread.assert_not_called()
+
+
+class TestApiKeyProviders:
+    def test_lists_providers_with_a_key(self, client, monkeypatch):
+        for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "CUSTOM_LLM_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "from-env")
+        mock_config = create_mock_config(llm_provider="gemini")
+        mock_config.llm.api_keys = {"gemini": "saved"}
+        with patch("backend.main.get_config", return_value=mock_config), \
+             patch("backend.main.get_current_media_client", return_value=None):
+            data = client.get("/api/config").json()
+
+        assert data["api_key_providers"] == ["openai", "gemini"]

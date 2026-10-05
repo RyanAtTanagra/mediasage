@@ -1813,10 +1813,7 @@ function updateSettings() {
         ? '••••••••••••••••  (configured)'
         : 'Your Plex token';
 
-    const llmApiKeyInput = document.getElementById('llm-api-key');
-    llmApiKeyInput.placeholder = state.config.llm_api_key_set
-        ? '••••••••••••••••  (configured)'
-        : 'Your API key';
+    updateApiKeyPlaceholder(state.config.llm_provider);
 
     // Update Ollama settings
     const ollamaUrl = document.getElementById('ollama-url');
@@ -1829,7 +1826,7 @@ function updateSettings() {
     const customContext = document.getElementById('custom-context-window');
     customUrl.value = state.config.custom_url || '';
     customApiKey.value = '';  // Never show actual key
-    customApiKey.placeholder = state.config.llm_api_key_set && state.config.llm_provider === 'custom'
+    customApiKey.placeholder = (state.config.api_key_providers || []).includes('custom')
         ? '••••••••••••• (key saved)'
         : 'sk-... (optional)';
     customModel.value = state.config.model_analysis || '';  // Custom uses same model for both
@@ -1921,6 +1918,14 @@ function showServerFields(prefix, server) {
 
 function isSetupServerConnected(status) {
     return status.media_server === 'jellyfin' ? status.jellyfin_connected : status.plex_connected;
+}
+
+// Keys are stored per provider, so show whether the selected provider has one
+function updateApiKeyPlaceholder(provider) {
+    const hasKey = (state.config?.api_key_providers || []).includes(provider);
+    document.getElementById('llm-api-key').placeholder = hasKey
+        ? '••••••••••••••••  (configured)'
+        : 'Your API key';
 }
 
 function mediaServerLabel() {
@@ -2941,6 +2946,7 @@ function setupEventListeners() {
     // Provider selection change
     document.getElementById('llm-provider').addEventListener('change', (e) => {
         showProviderSettings(e.target.value);
+        updateApiKeyPlaceholder(e.target.value);
     });
 
     document.getElementById('cloud-model-generation').addEventListener('change', updateCloudModelInfo);
