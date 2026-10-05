@@ -180,6 +180,12 @@ def init_schema(conn: sqlite3.Connection) -> bool:
     except sqlite3.OperationalError:
         pass  # Column already exists
 
+    try:
+        conn.execute("ALTER TABLE sync_state ADD COLUMN cache_version INTEGER DEFAULT 1")
+        logger.info("Migration applied: added cache_version to sync_state")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Index on parent_rating_key (must come after migration adds the column)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_parent_key ON tracks(parent_rating_key)")
 
@@ -189,6 +195,10 @@ def init_schema(conn: sqlite3.Connection) -> bool:
 
 # Whether a migration was applied on startup (signals need for re-sync)
 _migration_applied = False
+
+# Bump when sync starts storing different data, so existing caches re-sync on upgrade.
+# 2: Plex genres combine album, artist and track genres (album only before)
+CACHE_VERSION = 2
 
 
 def ensure_db_initialized() -> sqlite3.Connection:
@@ -464,12 +474,32 @@ _INSERT_TRACK_SQL = (
 )
 
 
-def _plex_track_row(album_metadata: dict[str, dict[str, Any]], track: Any) -> tuple:
-    """Build a tracks-table row from a raw plexapi track; genres and year come from its album."""
+def _merge_genres(*genre_lists: list[str]) -> list[str]:
+    """Combine genre lists in order, dropping case-insensitive duplicates."""
+    merged: dict[str, str] = {}
+    for genres in genre_lists:
+        for genre in genres:
+            merged.setdefault(genre.lower(), genre)
+    return list(merged.values())
+
+
+def _plex_track_row(
+    album_metadata: dict[str, dict[str, Any]], artist_genres: dict[str, list[str]], track: Any
+) -> tuple:
+    """Build a tracks-table row from a raw plexapi track.
+
+    The year comes from its album. Genres combine the album's, the artist's (where people
+    usually curate their own) and the track's own tags.
+    """
     title = track.title
     album = getattr(track, "parentTitle", "") or ""
     parent_key = str(getattr(track, "parentRatingKey", ""))
     album_data = album_metadata.get(parent_key, {})
+    genres = _merge_genres(
+        album_data.get("genres", []),
+        artist_genres.get(str(getattr(track, "grandparentRatingKey", "")), []),
+        [g.tag for g in getattr(track, "genres", None) or []],
+    )
     last_viewed_at = getattr(track, "lastViewedAt", None)
     return (
         str(track.ratingKey),
@@ -478,7 +508,7 @@ def _plex_track_row(album_metadata: dict[str, dict[str, Any]], track: Any) -> tu
         album,
         track.duration or 0,
         album_data.get("year"),
-        json.dumps(album_data.get("genres", [])),
+        json.dumps(genres),
         getattr(track, "userRating", None),
         _is_live_version(title, album),
         parent_key,
@@ -564,8 +594,9 @@ def sync_library(
             logger.info("Fetching album metadata from Plex...")
             album_metadata = media_client.get_all_albums_metadata()
             logger.info("Got metadata for %d albums", len(album_metadata))
+            artist_genres = media_client.get_all_artist_genres()
             fetch_tracks = media_client.get_all_raw_tracks
-            to_row = partial(_plex_track_row, album_metadata)
+            to_row = partial(_plex_track_row, album_metadata, artist_genres)
         else:
             fetch_tracks = media_client.get_all_tracks_for_sync
             to_row = _jellyfin_track_row
@@ -618,8 +649,8 @@ def sync_library(
 
         conn.execute(
             "UPDATE sync_state SET plex_server_id = ?, last_sync_at = ?, "
-            "track_count = ?, sync_duration_ms = ? WHERE id = 1",
-            (server_id, synced_at, synced_count, duration_ms),
+            "track_count = ?, sync_duration_ms = ?, cache_version = ? WHERE id = 1",
+            (server_id, synced_at, synced_count, duration_ms, CACHE_VERSION),
         )
         conn.commit()
 
@@ -788,14 +819,19 @@ def replace_library(get_media_client: Callable[[], Any], switch: int) -> None:
 
 
 def needs_resync() -> bool:
-    """Check if a schema migration was applied that requires a re-sync.
+    """Check if the cache must be re-synced: a schema migration, or an older CACHE_VERSION.
 
-    Returns:
-        True if a migration was applied and sync hasn't completed yet.
-        Safe for fresh DBs: _migration_applied is False when CREATE TABLE
-        already includes all columns (ALTER TABLE no-ops).
+    Safe for fresh DBs: _migration_applied is False when CREATE TABLE already includes
+    all columns, and an empty cache has nothing to rebuild.
     """
-    return _migration_applied
+    if _migration_applied:
+        return True
+    conn = ensure_db_initialized()
+    try:
+        row = conn.execute("SELECT track_count, cache_version FROM sync_state WHERE id = 1").fetchone()
+    finally:
+        conn.close()
+    return bool(row and row["track_count"] and (row["cache_version"] or 1) < CACHE_VERSION)
 
 
 def get_album_candidates(

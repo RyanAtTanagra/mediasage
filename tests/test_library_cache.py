@@ -445,6 +445,9 @@ class TestSyncLibrary:
             def get_all_albums_metadata(self):
                 return self.album_metadata
 
+            def get_all_artist_genres(self):
+                return {}
+
             def get_all_raw_tracks(self):
                 return self.tracks
 
@@ -591,6 +594,9 @@ class TestSyncLibrary:
             def get_all_albums_metadata(self):
                 return {"100": {"genres": ["Electronic"], "year": 2024}}
 
+            def get_all_artist_genres(self):
+                return {}
+
             def get_all_raw_tracks(self):
                 return [mock_track("new-1", "New Song", "New Artist", "New Album", 200000, "100")]
 
@@ -616,6 +622,9 @@ class TestSyncLibrary:
             def get_all_albums_metadata(self):
                 return {"100": {"genres": ["Rock"], "year": 2020}}
 
+            def get_all_artist_genres(self):
+                return {}
+
             def get_all_raw_tracks(self):
                 return [mock_track("1", "Song", "Artist", "Album", 180000, "100")]
 
@@ -633,6 +642,9 @@ class TestSyncLibrary:
 
             def get_all_albums_metadata(self):
                 raise ConnectionError("Plex unreachable")
+
+            def get_all_artist_genres(self):
+                return {}
 
         result = library_cache.sync_library(FailingClient())
         assert result["success"] is False
@@ -665,6 +677,9 @@ class TestSyncLibrary:
                 return "test-server-123"
 
             def get_all_albums_metadata(self):
+                return {}
+
+            def get_all_artist_genres(self):
                 return {}
 
             def get_all_raw_tracks(self):
@@ -849,3 +864,61 @@ class TestArtistFilters:
 
     def test_artist_names(self, artist_db):
         assert set(library_cache.get_artist_names()) == {"Radiohead", "Portishead", "Massive Attack", "Oasis"}
+
+
+class TestPlexGenres:
+    """Plex track genres combine album, artist and track genres (#30)."""
+
+    class Tag:
+        def __init__(self, tag):
+            self.tag = tag
+
+    def _track(self, genres=()):
+        track = type("Track", (), {})()
+        track.ratingKey, track.title, track.parentTitle = "1", "Song", "Album"
+        track.grandparentTitle, track.grandparentRatingKey, track.parentRatingKey = "Artist", "50", "100"
+        track.duration, track.userRating, track.viewCount, track.lastViewedAt = 1, None, 0, None
+        track.genres = [self.Tag(g) for g in genres]
+        return track
+
+    def _genres(self, album, artist, track):
+        row = library_cache._plex_track_row(
+            {"100": {"genres": album, "year": 1990}}, {"50": artist}, self._track(track)
+        )
+        return json.loads(row[6])
+
+    def test_combines_album_artist_and_track_genres(self):
+        assert self._genres(["Pop/Rock"], ["Goth", "Dark Wave"], ["Post-Punk"]) == [
+            "Pop/Rock", "Goth", "Dark Wave", "Post-Punk",
+        ]
+
+    def test_drops_case_insensitive_duplicates(self):
+        assert self._genres(["Rock"], ["rock", "Goth"], ["ROCK"]) == ["Rock", "Goth"]
+
+    def test_album_without_genres_uses_artist_genres(self):
+        assert self._genres([], ["Goth"], []) == ["Goth"]
+
+
+class TestCacheVersion:
+    """Caches built by older sync logic are re-synced on upgrade."""
+
+    def _set(self, db, track_count, version):
+        conn = sqlite3.connect(str(db))
+        conn.execute("UPDATE sync_state SET track_count = ?, cache_version = ? WHERE id = 1", (track_count, version))
+        conn.commit()
+        conn.close()
+
+    def test_older_cache_needs_resync(self, initialized_db, monkeypatch):
+        monkeypatch.setattr(library_cache, "_migration_applied", False)
+        self._set(initialized_db, 100, 1)
+        assert library_cache.needs_resync()
+
+    def test_current_cache_does_not(self, initialized_db, monkeypatch):
+        monkeypatch.setattr(library_cache, "_migration_applied", False)
+        self._set(initialized_db, 100, library_cache.CACHE_VERSION)
+        assert not library_cache.needs_resync()
+
+    def test_empty_cache_does_not(self, initialized_db, monkeypatch):
+        monkeypatch.setattr(library_cache, "_migration_applied", False)
+        self._set(initialized_db, 0, 1)
+        assert not library_cache.needs_resync()

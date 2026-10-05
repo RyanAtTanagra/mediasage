@@ -323,6 +323,19 @@ class PlexClient(BaseMediaClient):
             logger.exception("Failed to get album metadata: %s", e)
             return {}
 
+    def get_all_artist_genres(self) -> dict[str, list[str]]:
+        """Map each artist's rating key to its genres (where people usually curate their own)."""
+        if not self._library:
+            return {}
+        try:
+            return {
+                str(artist.ratingKey): [g.tag for g in artist.genres]
+                for artist in self._library.search(libtype="artist")
+            }
+        except Exception:
+            logger.exception("Failed to get artist genres")
+            return {}
+
     def get_library_stats(self) -> dict[str, Any]:
         """Get statistics about the music library.
 
