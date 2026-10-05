@@ -293,7 +293,7 @@ async function validateJellyfin(url, token, library) {
     });
 }
 
-async function validateAI(provider, apiKey, ollamaUrl, customUrl, customModel) {
+async function validateAI(provider, apiKey, ollamaUrl, customUrl, customModel, ollamaModel) {
     return apiCall('/setup/validate-ai', {
         method: 'POST',
         body: JSON.stringify({
@@ -302,6 +302,7 @@ async function validateAI(provider, apiKey, ollamaUrl, customUrl, customModel) {
             ollama_url: ollamaUrl || '',
             custom_url: customUrl || '',
             custom_model: customModel || '',
+            ollama_model: ollamaModel || '',
         }),
     });
 }
@@ -5310,6 +5311,28 @@ const SETUP_AI_HINTS = {
     custom: 'Any OpenAI-compatible API endpoint',
 };
 
+// Fill the setup wizard's Ollama model list from the server at the entered URL
+async function loadSetupOllamaModels() {
+    const select = document.getElementById('setup-ai-ollama-model');
+    const url = document.getElementById('setup-ai-ollama-url').value.trim();
+    const setOnly = (text) => {
+        select.innerHTML = `<option value="">${escapeHtml(text)}</option>`;
+        select.disabled = true;
+    };
+    if (!url) return setOnly('Enter your Ollama URL to list models');
+
+    setOnly('Loading models...');
+    try {
+        const { models = [], error } = await fetchOllamaModels(url);
+        if (error) return setOnly(error);
+        if (!models.length) return setOnly('No models installed (run: ollama pull <model>)');
+        select.innerHTML = models.map(m => `<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)}</option>`).join('');
+        select.disabled = false;
+    } catch {
+        setOnly(`Cannot reach Ollama at ${url}`);
+    }
+}
+
 function enterSetupWizard(status) {
     state.setup.active = true;
     state.setup.status = status;
@@ -5584,6 +5607,13 @@ function setupWizardEventListeners() {
         ollamaGroup.classList.toggle('hidden', provider !== 'ollama');
         customGroup.classList.toggle('hidden', provider !== 'custom');
         if (hintEl) hintEl.innerHTML = SETUP_AI_HINTS[provider] || '';
+        if (provider === 'ollama') loadSetupOllamaModels();
+    });
+
+    let ollamaUrlDebounce = null;
+    document.getElementById('setup-ai-ollama-url').addEventListener('input', () => {
+        clearTimeout(ollamaUrlDebounce);
+        ollamaUrlDebounce = setTimeout(loadSetupOllamaModels, 500);
     });
 
     // AI validation
@@ -5592,6 +5622,7 @@ function setupWizardEventListeners() {
         const ollamaUrl = document.getElementById('setup-ai-ollama-url')?.value.trim() || '';
         const customUrl = document.getElementById('setup-ai-custom-url')?.value.trim() || '';
         const customModel = document.getElementById('setup-ai-custom-model').value.trim();
+        const ollamaModel = document.getElementById('setup-ai-ollama-model').value;
         const apiKey = provider === 'custom'
             ? document.getElementById('setup-ai-custom-key').value.trim()
             : document.getElementById('setup-ai-key')?.value.trim() || '';
@@ -5605,6 +5636,10 @@ function setupWizardEventListeners() {
             setStepError('ai', 'API URL and model name are required');
             return;
         }
+        if (provider === 'ollama' && !ollamaModel) {
+            setStepError('ai', 'Choose a model');
+            return;
+        }
 
         clearStepError('ai');
         const btn = document.getElementById('setup-ai-btn');
@@ -5612,7 +5647,7 @@ function setupWizardEventListeners() {
         btn.textContent = 'Validating...';
 
         try {
-            const result = await validateAI(provider, apiKey, ollamaUrl, customUrl, customModel);
+            const result = await validateAI(provider, apiKey, ollamaUrl, customUrl, customModel, ollamaModel);
             if (result.success) {
                 state.setup.status.llm_configured = true;
                 state.setup.status.llm_provider = provider;

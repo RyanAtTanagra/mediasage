@@ -488,11 +488,21 @@ async def setup_validate_ai(request: ValidateAIRequest) -> ValidateAIResponse:
             )
 
         elif provider == "ollama":
-            status = await asyncio.to_thread(get_ollama_status, request.ollama_url or "http://localhost:11434")
+            ollama_url = request.ollama_url or "http://localhost:11434"
+            status = await asyncio.to_thread(get_ollama_status, ollama_url)
             if not status.connected:
                 return ValidateAIResponse(
                     success=False,
                     error=status.error or "Cannot connect to Ollama",
+                    provider_name=provider_name,
+                )
+            if not request.ollama_model:
+                return ValidateAIResponse(success=False, error="Choose a model", provider_name=provider_name)
+            ollama_model_info = await asyncio.to_thread(get_ollama_model_info, ollama_url, request.ollama_model)
+            if not ollama_model_info:
+                return ValidateAIResponse(
+                    success=False,
+                    error=f"Model {request.ollama_model} not found in Ollama",
                     provider_name=provider_name,
                 )
 
@@ -530,8 +540,12 @@ async def setup_validate_ai(request: ValidateAIRequest) -> ValidateAIResponse:
     config_updates = {"llm_provider": provider}
     if request.api_key:
         config_updates["llm_api_key"] = request.api_key
-    if provider == "ollama" and request.ollama_url:
-        config_updates["ollama_url"] = request.ollama_url
+    if provider == "ollama":
+        if request.ollama_url:
+            config_updates["ollama_url"] = request.ollama_url
+        config_updates["model_analysis"] = request.ollama_model
+        config_updates["model_generation"] = request.ollama_model
+        config_updates["ollama_context_window"] = ollama_model_info.context_window
     if provider == "custom" and request.custom_url:
         config_updates["custom_url"] = request.custom_url
         config_updates["model_analysis"] = request.custom_model

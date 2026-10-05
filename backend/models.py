@@ -948,6 +948,7 @@ class ValidateAIRequest(BaseModel):
     ollama_url: str = ""
     custom_url: str = ""
     custom_model: str = ""
+    ollama_model: str = ""
 
 
 class ValidateAIResponse(BaseModel):
