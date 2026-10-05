@@ -335,6 +335,7 @@ Environment variables are optional, for scripted or automated installs. A variab
 | `OLLAMA_CONTEXT_WINDOW` | Override detected context window for Ollama (default: 32768) |
 | `CUSTOM_LLM_URL` | Custom OpenAI-compatible API base URL |
 | `CUSTOM_LLM_API_KEY` | API key for custom provider (if required) |
+| `CUSTOM_LLM_MODEL` | Model name for the custom provider, used for analysis and generation |
 | `CUSTOM_CONTEXT_WINDOW` | Context window size for custom provider (default: 32768) |
 
 ### Jellyfin
@@ -410,15 +411,15 @@ Run MediaSage with local models for privacy and zero API costs.
 <details>
 <summary><strong>Custom OpenAI-Compatible API</strong></summary>
 
-For LM Studio, text-generation-webui, vLLM, or any OpenAI-compatible server:
+For LM Studio, text-generation-webui, vLLM, or any OpenAI-compatible service (OpenRouter, Mammouth, etc.):
 
-1. Start your server with an OpenAI-compatible endpoint
+1. Start your server, or get the service's base URL and API key
 
-2. Configure in Settings:
+2. Configure in the setup wizard or Settings (or with `CUSTOM_LLM_URL`, `CUSTOM_LLM_API_KEY` and `CUSTOM_LLM_MODEL`):
    - **API Base URL:** `http://localhost:5000/v1`
    - **API Key:** If required by your server
-   - **Model Name:** The model identifier
-   - **Context Window:** Your model's context size
+   - **Model Name:** The model identifier (required; the service's `/v1/models` lists them)
+   - **Context Window:** Your model's context size (Settings only)
 
 </details>
 

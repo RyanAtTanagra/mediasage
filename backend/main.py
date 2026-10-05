@@ -471,6 +471,10 @@ async def setup_validate_ai(request: ValidateAIRequest) -> ValidateAIResponse:
                 return ValidateAIResponse(
                     success=False, error="Custom URL is required", provider_name=provider_name
                 )
+            if not request.custom_model:
+                return ValidateAIResponse(
+                    success=False, error="Model name is required", provider_name=provider_name
+                )
             headers = {}
             if request.api_key:
                 headers["Authorization"] = f"Bearer {request.api_key}"
@@ -500,6 +504,8 @@ async def setup_validate_ai(request: ValidateAIRequest) -> ValidateAIResponse:
         config_updates["ollama_url"] = request.ollama_url
     if provider == "custom" and request.custom_url:
         config_updates["custom_url"] = request.custom_url
+        config_updates["model_analysis"] = request.custom_model
+        config_updates["model_generation"] = request.custom_model
 
     try:
         config = update_config_values(config_updates)

@@ -643,3 +643,55 @@ class TestRequestTimeout:
 
     def test_env_var_overrides(self, tmp_path, monkeypatch):
         assert self._load(tmp_path, monkeypatch, env="2400", yaml_timeout=1800) == 2400
+
+
+class TestCustomModel:
+    """CUSTOM_LLM_MODEL sets the custom endpoint's model without touching other setups (#20)."""
+
+    ENV_VARS = ["LLM_PROVIDER", "LLM_MODEL_ANALYSIS", "LLM_MODEL_GENERATION", "CUSTOM_LLM_MODEL",
+                "CUSTOM_LLM_URL", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
+
+    def _load(self, tmp_path, monkeypatch, saved_llm, **env):
+        for var in self.ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+        for var, value in env.items():
+            monkeypatch.setenv(var, value)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+        with patch("backend.config.load_user_yaml_config", return_value={"llm": saved_llm}):
+            return load_config(config_file).llm
+
+    def test_sets_both_models_for_custom(self, tmp_path, monkeypatch):
+        llm = self._load(tmp_path, monkeypatch, {"provider": "custom", "custom_url": "http://x/v1"},
+                         CUSTOM_LLM_MODEL="gpt-4o-mini")
+        assert (llm.model_analysis, llm.model_generation) == ("gpt-4o-mini", "gpt-4o-mini")
+
+    def test_llm_model_vars_still_win(self, tmp_path, monkeypatch):
+        llm = self._load(tmp_path, monkeypatch, {"provider": "custom", "custom_url": "http://x/v1"},
+                         CUSTOM_LLM_MODEL="small", LLM_MODEL_ANALYSIS="big")
+        assert (llm.model_analysis, llm.model_generation) == ("big", "small")
+
+    def test_saved_custom_models_still_load(self, tmp_path, monkeypatch):
+        llm = self._load(tmp_path, monkeypatch, {
+            "provider": "custom", "custom_url": "http://x/v1",
+            "model_analysis": "saved-a", "model_generation": "saved-g",
+        })
+        assert (llm.model_analysis, llm.model_generation) == ("saved-a", "saved-g")
+
+    def test_no_effect_on_other_providers(self, tmp_path, monkeypatch):
+        for provider, saved in [("gemini", "gemini-3.8-flash"), ("anthropic", "claude-opus-5-5"), ("openai", "gpt-6-luna")]:
+            llm = self._load(tmp_path, monkeypatch, {
+                "provider": provider, "api_key": "k", "model_analysis": saved, "model_generation": saved,
+            }, CUSTOM_LLM_MODEL="gpt-4o-mini")
+            assert (llm.model_analysis, llm.model_generation) == (saved, saved), provider
+
+    def test_defaults_unchanged_for_other_providers(self, tmp_path, monkeypatch):
+        llm = self._load(tmp_path, monkeypatch, {"provider": "gemini", "api_key": "k"}, CUSTOM_LLM_MODEL="x")
+        assert llm.model_analysis == MODEL_DEFAULTS["gemini"]["analysis"]
+
+    def test_locks_custom_model_in_settings(self, monkeypatch):
+        for var in self.ENV_VARS:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("CUSTOM_LLM_MODEL", "gpt-4o-mini")
+        assert env_overrides("custom")["model_analysis"] == "CUSTOM_LLM_MODEL"
+        assert "model_analysis" not in env_overrides("gemini")

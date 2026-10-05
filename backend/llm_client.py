@@ -291,6 +291,9 @@ class LLMClient:
         }.get(self.provider)
         if not complete:
             raise ValueError(f"Unknown provider: {self.provider}")
+        if not model:
+            # Otherwise the provider gets an empty model name and returns a cryptic error
+            raise RuntimeError("No AI model is set. Choose one in Settings.")
 
         try:
             return complete(prompt, system, model)

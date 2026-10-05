@@ -291,7 +291,7 @@ async function validateJellyfin(url, token, library) {
     });
 }
 
-async function validateAI(provider, apiKey, ollamaUrl, customUrl) {
+async function validateAI(provider, apiKey, ollamaUrl, customUrl, customModel) {
     return apiCall('/setup/validate-ai', {
         method: 'POST',
         body: JSON.stringify({
@@ -299,6 +299,7 @@ async function validateAI(provider, apiKey, ollamaUrl, customUrl) {
             api_key: apiKey || '',
             ollama_url: ollamaUrl || '',
             custom_url: customUrl || '',
+            custom_model: customModel || '',
         }),
     });
 }
@@ -1798,7 +1799,7 @@ const ENV_OVERRIDABLE_INPUTS = {
     jellyfin_music_library: ['jellyfin-music-library'],
     llm_provider: ['llm-provider'],
     llm_api_key: ['llm-api-key', 'custom-api-key'],
-    model_analysis: ['cloud-model-analysis'],
+    model_analysis: ['cloud-model-analysis', 'custom-model'],
     model_generation: ['cloud-model-generation'],
     ollama_url: ['ollama-url'],
     custom_url: ['custom-url'],
@@ -5491,17 +5492,20 @@ function setupWizardEventListeners() {
     // AI validation
     document.getElementById('setup-ai-btn').addEventListener('click', async () => {
         const provider = document.getElementById('setup-ai-provider').value;
-        const apiKey = document.getElementById('setup-ai-key')?.value.trim() || '';
         const ollamaUrl = document.getElementById('setup-ai-ollama-url')?.value.trim() || '';
         const customUrl = document.getElementById('setup-ai-custom-url')?.value.trim() || '';
+        const customModel = document.getElementById('setup-ai-custom-model').value.trim();
+        const apiKey = provider === 'custom'
+            ? document.getElementById('setup-ai-custom-key').value.trim()
+            : document.getElementById('setup-ai-key')?.value.trim() || '';
 
         // Basic client-side validation
         if (['gemini', 'anthropic', 'openai'].includes(provider) && !apiKey) {
             setStepError('ai', 'API key is required');
             return;
         }
-        if (provider === 'custom' && !customUrl) {
-            setStepError('ai', 'API URL is required');
+        if (provider === 'custom' && (!customUrl || !customModel)) {
+            setStepError('ai', 'API URL and model name are required');
             return;
         }
 
@@ -5511,7 +5515,7 @@ function setupWizardEventListeners() {
         btn.textContent = 'Validating...';
 
         try {
-            const result = await validateAI(provider, apiKey, ollamaUrl, customUrl);
+            const result = await validateAI(provider, apiKey, ollamaUrl, customUrl, customModel);
             if (result.success) {
                 state.setup.status.llm_configured = true;
                 state.setup.status.llm_provider = provider;

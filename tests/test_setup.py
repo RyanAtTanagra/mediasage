@@ -1,7 +1,7 @@
 """Tests for setup/onboarding endpoints."""
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -269,6 +269,42 @@ class TestSetupValidateAI:
 
         assert response.status_code == 200
         assert response.json()["success"] is True
+
+
+    def test_validate_custom_saves_key_and_model(self, client):
+        """The wizard saves the custom endpoint's key and model, not just its URL (#20)."""
+        models_response = MagicMock(raise_for_status=MagicMock())
+        http = MagicMock()
+        http.get = AsyncMock(return_value=models_response)
+        http.__aenter__ = AsyncMock(return_value=http)
+        http.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("backend.main.httpx.AsyncClient", return_value=http),
+            patch("backend.main.update_config_values", return_value=create_mock_config(llm_provider="custom")) as update,
+            patch("backend.main.init_llm_client"),
+        ):
+            response = client.post("/api/setup/validate-ai", json={
+                "provider": "custom",
+                "api_key": "mammouth-key",
+                "custom_url": "https://api.mammouth.ai/v1",
+                "custom_model": "gpt-4o-mini",
+            })
+
+        assert response.json()["success"] is True
+        assert http.get.call_args.kwargs["headers"] == {"Authorization": "Bearer mammouth-key"}
+        saved = update.call_args.args[0]
+        assert saved["llm_api_key"] == "mammouth-key"
+        assert saved["model_analysis"] == saved["model_generation"] == "gpt-4o-mini"
+
+    def test_validate_custom_requires_model(self, client):
+        response = client.post("/api/setup/validate-ai", json={
+            "provider": "custom", "custom_url": "https://api.mammouth.ai/v1",
+        })
+
+        assert response.json() == {
+            "success": False, "error": "Model name is required", "provider_name": "Custom (OpenAI-compatible)",
+        }
 
 
 class TestSetupComplete:

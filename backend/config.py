@@ -168,6 +168,9 @@ def env_overrides(provider: str) -> dict[str, str]:
     key_var = _API_KEY_ENV.get(provider)
     if key_var and os.environ.get(key_var):
         overrides["llm_api_key"] = key_var
+    if provider == "custom" and os.environ.get("CUSTOM_LLM_MODEL"):
+        overrides.setdefault("model_analysis", "CUSTOM_LLM_MODEL")
+        overrides.setdefault("model_generation", "CUSTOM_LLM_MODEL")
     return overrides
 
 
@@ -302,6 +305,12 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             llm_yaml.get("model_generation"),
             provider_defaults["generation"],
         )
+
+    # CUSTOM_LLM_MODEL sets both models for a custom endpoint; LLM_MODEL_* still win
+    custom_model = os.environ.get("CUSTOM_LLM_MODEL")
+    if provider == "custom" and custom_model:
+        model_analysis = os.environ.get("LLM_MODEL_ANALYSIS") or custom_model
+        model_generation = os.environ.get("LLM_MODEL_GENERATION") or custom_model
 
     request_timeout = int(get_env_or_yaml("LLM_TIMEOUT", llm_yaml.get("request_timeout"), 600))
 

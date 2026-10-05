@@ -342,6 +342,18 @@ class TestOllamaProvider:
                 with pytest.raises(RuntimeError, match=f"within {waited}. Raise Request Timeout"):
                     client.analyze("prompt", "system")
 
+    def test_empty_model_gives_clear_error(self):
+        """An empty model name used to reach the provider as model= (#20)."""
+        from backend.llm_client import LLMClient
+        from backend.models import LLMConfig
+
+        config = LLMConfig(provider="custom", custom_url="http://x/v1", model_analysis="", model_generation="")
+        with patch("backend.llm_client.openai"):
+            client = LLMClient(config)
+            with pytest.raises(RuntimeError, match="No AI model is set"):
+                client.generate("prompt", "system")
+            client._client.chat.completions.create.assert_not_called()
+
     def test_cloud_clients_use_configured_timeout(self):
         from backend.llm_client import LLMClient
         from backend.models import LLMConfig
