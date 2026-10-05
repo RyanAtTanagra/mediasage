@@ -2,8 +2,11 @@
 
 from unittest.mock import patch
 
+import pytest
+
 import yaml
 
+from backend import config as config_module
 from backend.config import (
     deep_merge,
     env_overrides,
@@ -576,3 +579,44 @@ class TestEnvOverrides:
         assert config.plex.url == "http://saved:32400"
         assert config.plex.token == "saved-token"
         assert config.plex.music_library == "Tunes"
+
+
+class TestUpdateConfigModels:
+    """Saving the AI provider only resets models when the provider changes (#29)."""
+
+    @pytest.fixture
+    def saved(self, monkeypatch):
+        current = config_module.AppConfig(
+            plex=config_module.PlexConfig(url="", token=""),
+            llm=config_module.LLMConfig(
+                provider="gemini", api_key="k",
+                model_analysis="gemini-3.8-flash", model_generation="gemini-3.1-flash-lite",
+            ),
+        )
+        monkeypatch.setattr(config_module, "_config", current)
+        written = {}
+        monkeypatch.setattr(config_module, "save_user_config", written.update)
+        return written
+
+    def test_same_provider_keeps_models(self, saved):
+        config = config_module.update_config_values({"llm_provider": "gemini", "llm_api_key": "new"})
+
+        assert config.llm.model_analysis == "gemini-3.8-flash"
+        assert config.llm.model_generation == "gemini-3.1-flash-lite"
+        assert "model_analysis" not in saved["llm"]
+
+    def test_new_provider_gets_its_defaults(self, saved):
+        config = config_module.update_config_values({"llm_provider": "anthropic"})
+
+        assert config.llm.model_analysis == MODEL_DEFAULTS["anthropic"]["analysis"]
+        assert config.llm.model_generation == MODEL_DEFAULTS["anthropic"]["generation"]
+
+    def test_new_provider_with_chosen_models(self, saved):
+        config = config_module.update_config_values({
+            "llm_provider": "anthropic",
+            "model_analysis": "claude-opus-5-5",
+            "model_generation": "claude-sonnet-5-5",
+        })
+
+        assert config.llm.model_analysis == "claude-opus-5-5"
+        assert config.llm.model_generation == "claude-sonnet-5-5"

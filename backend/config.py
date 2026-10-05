@@ -390,8 +390,9 @@ def update_config_values(updates: dict[str, Any]) -> AppConfig:
             if env_keys.get(new_provider):
                 llm_updates["api_key"] = env_keys[new_provider]
 
-        # Auto-select default models for new provider
-        if new_provider in MODEL_DEFAULTS:
+        # Default models only on an actual provider change, so re-saving the same
+        # provider (Settings, setup wizard) keeps models the user picked
+        if new_provider != _config.llm.provider and new_provider in MODEL_DEFAULTS:
             defaults = MODEL_DEFAULTS[new_provider]
             if not updates.get("model_analysis"):
                 llm_updates["model_analysis"] = defaults["analysis"]
