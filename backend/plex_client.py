@@ -641,11 +641,7 @@ class PlexClient(BaseMediaClient):
             return None
 
     def get_art_url(self, item_id: str) -> str | None:
-        """Get the proxied art URL for a track/album item.
-
-        Returns the Plex thumb path (relative) which main.py will proxy with auth.
-        We return the thumb path here; main.py appends the base URL and token.
-        """
+        """Relative Plex thumb path; main.py adds the server URL and token when proxying."""
         return self.get_thumb_path(item_id)
 
     def create_playlist(

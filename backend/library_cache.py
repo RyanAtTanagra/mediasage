@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
@@ -41,6 +42,16 @@ _sync_state = {
 
 # Lock to prevent race conditions when starting sync
 _sync_lock = threading.Lock()
+
+# Switching media servers: stop a running sync, ignore the old server's cache until replaced
+_cancel_sync = threading.Event()
+_replace_lock = threading.Lock()
+_cache_from_previous_server = False
+_switch_count = 0
+
+
+class SyncCancelled(Exception):
+    """Raised inside sync_library when replace_library() asks it to stop."""
 
 # Track if schema has been initialized
 _schema_initialized = False
@@ -404,17 +415,67 @@ def check_server_changed(current_server_id: str) -> bool:
     return cached_server_id != current_server_id
 
 
+_INSERT_TRACK_SQL = (
+    "INSERT OR REPLACE INTO tracks "
+    "(rating_key, title, artist, album, duration_ms, year, genres, "
+    "user_rating, is_live, parent_rating_key, view_count, last_viewed_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+def _plex_track_row(album_metadata: dict[str, dict[str, Any]], track: Any) -> tuple:
+    """Build a tracks-table row from a raw plexapi track; genres and year come from its album."""
+    title = track.title
+    album = getattr(track, "parentTitle", "") or ""
+    parent_key = str(getattr(track, "parentRatingKey", ""))
+    album_data = album_metadata.get(parent_key, {})
+    last_viewed_at = getattr(track, "lastViewedAt", None)
+    return (
+        str(track.ratingKey),
+        title,
+        getattr(track, "grandparentTitle", "") or "Unknown Artist",
+        album,
+        track.duration or 0,
+        album_data.get("year"),
+        json.dumps(album_data.get("genres", [])),
+        getattr(track, "userRating", None),
+        _is_live_version(title, album),
+        parent_key,
+        getattr(track, "viewCount", 0) or 0,
+        last_viewed_at.isoformat() if last_viewed_at else None,
+    )
+
+
+def _jellyfin_track_row(row: dict[str, Any]) -> tuple:
+    """Build a tracks-table row from a JellyfinClient.get_all_tracks_for_sync() entry."""
+    track = row["track"]
+    return (
+        track.rating_key,
+        track.title,
+        track.artist or "Unknown Artist",
+        track.album,
+        track.duration_ms,
+        track.year,
+        json.dumps(track.genres),
+        track.user_rating,
+        _is_live_version(track.title, track.album),
+        row["album_key"],
+        row["view_count"],
+        row["last_viewed_at"],
+    )
+
+
 def sync_library(
-    plex_client: Any,
+    media_client: Any,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
-    """Sync tracks from Plex to local cache.
+    """Sync tracks from Plex or Jellyfin to local cache.
 
     This is a blocking synchronous operation. For async usage, wrap in
     asyncio.to_thread() or run in a thread pool.
 
     Args:
-        plex_client: PlexClient instance with active connection
+        media_client: Connected PlexClient or JellyfinClient
         on_progress: Optional callback(current, total) for progress updates
 
     Returns:
@@ -440,13 +501,13 @@ def sync_library(
 
     try:
         # Get server ID for cache validation
-        server_id = plex_client.get_machine_identifier()
+        server_id = media_client.get_machine_identifier()
         if not server_id:
-            raise ValueError("Could not get Plex server identifier")
+            raise ValueError("Could not get media server identifier")
 
         # Check if server changed - clear cache if so
         if check_server_changed(server_id):
-            logger.info("Plex server changed, clearing cache")
+            logger.info("Media server changed, clearing cache")
             clear_cache()
 
         conn = ensure_db_initialized()
@@ -458,93 +519,40 @@ def sync_library(
         # readers keep seeing that previous snapshot until the commit.
         conn.execute("DELETE FROM tracks")
 
-        # Detect client type: Plex (has get_all_raw_tracks) vs generic (Track models)
-        use_raw = hasattr(plex_client, "get_all_raw_tracks")
-
-        if use_raw:
-            # Phase 1 (Plex): Fetch albums for genre/year mapping
-            logger.info("Fetching album metadata from media server...")
-            album_metadata = plex_client.get_all_albums_metadata()
+        if hasattr(media_client, "get_all_raw_tracks"):
+            logger.info("Fetching album metadata from Plex...")
+            album_metadata = media_client.get_all_albums_metadata()
             logger.info("Got metadata for %d albums", len(album_metadata))
-
-            # Phase 2 (Plex): Fetch all raw tracks
-            with _sync_lock:
-                _sync_state["phase"] = "fetching"
-            logger.info("Fetching all tracks from media server (this may take 30-60s)...")
-            all_tracks = plex_client.get_all_raw_tracks()
+            fetch_tracks = media_client.get_all_raw_tracks
+            to_row = partial(_plex_track_row, album_metadata)
         else:
-            # Phase 1+2 (Jellyfin/generic): Fetch Track models directly
-            with _sync_lock:
-                _sync_state["phase"] = "fetching"
-            logger.info("Fetching all tracks from media server (this may take 30-60s)...")
-            all_tracks = plex_client.get_all_tracks()
-            album_metadata = {}  # Not needed; Track models already have genres/year
+            fetch_tracks = media_client.get_all_tracks_for_sync
+            to_row = _jellyfin_track_row
 
+        with _sync_lock:
+            _sync_state["phase"] = "fetching"
+        logger.info("Fetching all tracks from the media server (this may take 30-60s)...")
+        all_tracks = fetch_tracks()
         total = len(all_tracks)
-        logger.info("Got %d tracks from media server", total)
+        logger.info("Got %d tracks from the media server", total)
+        if _cancel_sync.is_set():
+            raise SyncCancelled
 
         with _sync_lock:
             _sync_state["total"] = total
             _sync_state["phase"] = "processing"
 
-        # Phase 3: Process tracks in batches
         synced_count = 0
         batch_data = []
 
-        for i, track in enumerate(all_tracks):
-            if use_raw:
-                # Raw Plex track objects
-                title = track.title
-                album = getattr(track, "parentTitle", "") or ""
-                artist = getattr(track, "grandparentTitle", "") or "Unknown Artist"
-                parent_key = str(getattr(track, "parentRatingKey", ""))
-                album_data = album_metadata.get(parent_key, {})
-                genres = album_data.get("genres", [])
-                year = album_data.get("year")
-                view_count = getattr(track, "viewCount", 0) or 0
-                last_viewed_at_raw = getattr(track, "lastViewedAt", None)
-                last_viewed_at = last_viewed_at_raw.isoformat() if last_viewed_at_raw else None
-                rating_key = str(track.ratingKey)
-                duration_ms = track.duration or 0
-                user_rating = getattr(track, "userRating", None)
-            else:
-                # Track model objects (Jellyfin)
-                title = track.title
-                album = track.album
-                artist = track.artist or "Unknown Artist"
-                parent_key = ""
-                genres = track.genres
-                year = track.year
-                view_count = 0
-                last_viewed_at = None
-                rating_key = track.rating_key
-                duration_ms = track.duration_ms
-                user_rating = track.user_rating
-
-            batch_data.append((
-                rating_key,
-                title,
-                artist,
-                album,
-                duration_ms,
-                year,
-                json.dumps(genres),  # Store genres as JSON array
-                user_rating,
-                _is_live_version(title, album),
-                parent_key,
-                view_count,
-                last_viewed_at,
-            ))
+        for track in all_tracks:
+            if _cancel_sync.is_set():
+                raise SyncCancelled
+            batch_data.append(to_row(track))
 
             # Insert and update progress every SYNC_BATCH_SIZE tracks
             if len(batch_data) >= SYNC_BATCH_SIZE:
-                conn.executemany(
-                    "INSERT OR REPLACE INTO tracks "
-                    "(rating_key, title, artist, album, duration_ms, year, genres, "
-                    "user_rating, is_live, parent_rating_key, view_count, last_viewed_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    batch_data,
-                )
+                conn.executemany(_INSERT_TRACK_SQL, batch_data)
                 synced_count += len(batch_data)
                 batch_data = []
 
@@ -558,13 +566,7 @@ def sync_library(
 
         # Insert remaining tracks
         if batch_data:
-            conn.executemany(
-                "INSERT OR REPLACE INTO tracks "
-                "(rating_key, title, artist, album, duration_ms, year, genres, "
-                "user_rating, is_live, parent_rating_key, view_count, last_viewed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                batch_data,
-            )
+            conn.executemany(_INSERT_TRACK_SQL, batch_data)
             synced_count += len(batch_data)
             with _sync_lock:
                 _sync_state["current"] = synced_count
@@ -591,6 +593,12 @@ def sync_library(
             "track_count": synced_count,
             "duration_ms": duration_ms,
         }
+
+    except SyncCancelled:
+        logger.info("Sync cancelled: the media server changed")
+        if conn:
+            conn.rollback()
+        return {"success": False, "error": "Sync cancelled"}
 
     except Exception as e:
         logger.exception("Sync failed: %s", e)
@@ -693,13 +701,43 @@ def count_tracks_by_filters(
 
 
 def has_cached_tracks() -> bool:
-    """Check if cache has any tracks.
+    """Check if the cache has tracks from the current media server."""
+    if _cache_from_previous_server:
+        return False
+    return get_sync_state()["track_count"] > 0
 
-    Returns:
-        True if cache is populated
+
+def invalidate_cache() -> int:
+    """Stop using the cache right away and cancel any sync in progress.
+
+    Called when the media server changes. Returns the switch number to pass to
+    replace_library(), which then rebuilds the cache.
     """
-    state = get_sync_state()
-    return state["track_count"] > 0
+    global _cache_from_previous_server, _switch_count
+    _cache_from_previous_server = True
+    _switch_count += 1
+    _cancel_sync.set()
+    return _switch_count
+
+
+def replace_library(get_media_client: Callable[[], Any], switch: int) -> None:
+    """Wait out any running sync, clear the cache and sync the current media server.
+
+    After several quick switches only the latest one syncs; earlier ones return early.
+    """
+    global _cache_from_previous_server
+    with _replace_lock:
+        if switch != _switch_count:
+            return
+        while get_sync_progress()["is_syncing"]:
+            time.sleep(0.5)
+        _cancel_sync.clear()
+        clear_cache()
+        _cache_from_previous_server = False
+
+        media_client = get_media_client()
+        if media_client and media_client.is_connected():
+            sync_library(media_client)
 
 
 def needs_resync() -> bool:

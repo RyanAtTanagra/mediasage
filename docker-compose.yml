@@ -19,11 +19,12 @@ services:
       # Optional: Plex URL as reached from browsers/phones, if different from PLEX_URL
       #- PLEX_PUBLIC_URL=https://plex.example.com
 
-      # Jellyfin server settings (use if MEDIA_SERVER=jellyfin)
+      # Jellyfin server settings (use if MEDIA_SERVER=jellyfin). Left commented out because
+      # a set variable, even an empty one, overrides what the setup wizard saves.
       # API key: create in Jellyfin Dashboard > API Keys
-      - JELLYFIN_URL=${JELLYFIN_URL:-}
-      - JELLYFIN_TOKEN=${JELLYFIN_TOKEN:-}
-      - JELLYFIN_MUSIC_LIBRARY=${JELLYFIN_MUSIC_LIBRARY:-Music}
+      #- JELLYFIN_URL=http://your-jellyfin-server:8096
+      #- JELLYFIN_TOKEN=your-jellyfin-api-key
+      #- JELLYFIN_MUSIC_LIBRARY=Music
 
       # Performance tuning
       - UVICORN_WORKERS=${UVICORN_WORKERS:-1}

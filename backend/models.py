@@ -1,5 +1,6 @@
 """Pydantic models for MediaSage API contracts and internal data structures."""
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -28,7 +29,7 @@ class Track(BaseModel):
     year: int | None = None
     genres: list[str] = []
     art_url: str | None = None
-    user_rating: int | None = None  # 0-10 scale (Plex/Jellyfin both use this)
+    user_rating: int | None = None  # 0-10 scale; Plex only
 
     @property
     def duration_formatted(self) -> str:
@@ -98,7 +99,7 @@ class JellyfinConfig(BaseModel):
     """Jellyfin server connection settings."""
 
     url: str = ""
-    token: str = ""  # API key from Jellyfin admin > API Keys
+    token: str = ""  # API key from Jellyfin Dashboard > API Keys
     music_library: str = "Music"
 
 
@@ -263,13 +264,17 @@ class GenerateResponse(BaseModel):
     track_reasons: dict[str, str] = {}
 
 
-def _validate_rating_keys(v: list[str]) -> list[str]:
-    """Validate a list of media server item IDs (must be non-empty).
+# Plex rating keys are numeric; Jellyfin item IDs are 32 hex characters
+_ITEM_ID_RE = re.compile(r"^(\d+|[0-9a-f]{32})$")
 
-    Accepts Plex numeric IDs and Jellyfin UUID-style hex IDs.
-    """
+
+def _validate_rating_keys(v: list[str]) -> list[str]:
+    """Validate a non-empty list of Plex or Jellyfin item IDs."""
     if not v:
         raise ValueError("At least one track is required")
+    for key in v:
+        if not _ITEM_ID_RE.match(key):
+            raise ValueError(f"Invalid rating key: {key}")
     return v
 
 
@@ -327,10 +332,6 @@ class PlexPlaylistInfo(BaseModel):
     track_count: int
 
 
-# Alias used for Jellyfin and any media-server-agnostic contexts
-MediaPlaylistInfo = PlexPlaylistInfo
-
-
 class PlexClientInfo(BaseModel):
     """Online Plex client info."""
 
@@ -358,8 +359,8 @@ class UpdatePlaylistRequest(BaseModel):
     @field_validator("playlist_id")
     @classmethod
     def validate_playlist_id(cls, v: str) -> str:
-        if not v:
-            raise ValueError("playlist_id cannot be empty")
+        if v != "__scratch__" and not _ITEM_ID_RE.match(v):
+            raise ValueError("playlist_id must be '__scratch__' or a Plex/Jellyfin ID")
         return v
 
     @field_validator("rating_keys")
@@ -417,7 +418,7 @@ class ConfigResponse(BaseModel):
     version: str
     media_server: str = "plex"
     plex_url: str
-    plex_connected: bool
+    plex_connected: bool  # The active media server, Plex or Jellyfin
     plex_token_set: bool  # True if token is configured (without revealing it)
     music_library: str | None
     # Jellyfin fields
@@ -443,6 +444,7 @@ class ConfigResponse(BaseModel):
     custom_context_window: int = 32768
     is_local_provider: bool = False
     provider_from_env: bool = False  # True if LLM_PROVIDER env var is overriding UI
+    media_server_from_env: bool = False  # True if MEDIA_SERVER env var is overriding UI
     models_from_env: bool = False  # True if LLM_MODEL_* env vars are overriding UI
     # Generation model's long-context pricing, if any
     long_context_threshold: int | None = None

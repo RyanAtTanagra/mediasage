@@ -4,49 +4,18 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
-from unidecode import unidecode
-
 from backend.models import Track
 
-# Patterns for detecting live recordings
 DATE_PATTERN = r"\d{4}[-/]\d{2}[-/]\d{2}"
 LIVE_KEYWORDS = r"\b(?:live|concert|sbd|bootleg)\b"
 
 
-def simplify_string(s: str) -> str:
-    """Normalize string for fuzzy comparison."""
-    s = s.lower()
-    s = re.sub(r"[^\w\s]", "", s)  # Remove punctuation
-    s = unidecode(s)  # Normalize unicode (café → cafe)
-    return s
-
-
-def normalize_artist(name: str) -> list[str]:
-    """Return variations of artist name for matching."""
-    variations = [name]
-    if " and " in name.lower():
-        variations.append(name.replace(" and ", " & ").replace(" And ", " & "))
-    elif " & " in name:
-        variations.append(name.replace(" & ", " and "))
-    return variations
-
-
 def is_live_track(title: str, album_title: str) -> bool:
-    """Check if a track appears to be a live recording based on title strings.
-
-    Args:
-        title: Track title
-        album_title: Album title
-
-    Returns:
-        True if track appears to be a live version
-    """
-    for text in [album_title, title]:
-        if re.search(DATE_PATTERN, text):
-            return True
-        if re.search(LIVE_KEYWORDS, text, re.IGNORECASE):
-            return True
-    return False
+    """Guess from the track and album titles whether a track is a live recording."""
+    return any(
+        re.search(DATE_PATTERN, text) or re.search(LIVE_KEYWORDS, text, re.IGNORECASE)
+        for text in (album_title, title)
+    )
 
 
 class BaseMediaClient(ABC):

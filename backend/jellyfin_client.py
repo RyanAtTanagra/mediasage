@@ -1,6 +1,8 @@
-"""Jellyfin media server client using REST API via httpx."""
+"""Jellyfin media server client using the REST API."""
 
 import logging
+import re
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -10,26 +12,31 @@ from backend.models import PlexPlaylistInfo, Track
 
 logger = logging.getLogger(__name__)
 
-# Singleton instance
 _jellyfin_client: "JellyfinClient | None" = None
 
+_ITEM_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+TRACK_FIELDS = "Genres,ProductionYear,RunTimeTicks,AlbumArtist,Album,Artists"
+PAGE_SIZE = 1000
+SCRATCH_PLAYLIST_TITLE = "MediaSage - Now Playing"
 
-def _decade_to_years(decade: str) -> list[int]:
-    """Convert a decade string like '1980s' to a list of years [1980..1989]."""
-    decade = decade.strip().rstrip("s")
-    try:
-        start = int(decade)
-        return list(range(start, start + 10))
-    except ValueError:
-        return []
+
+def _years_param(decades: list[str]) -> str | None:
+    """Turn ["1980s", "1990s"] into Jellyfin's comma-separated Years filter."""
+    years = []
+    for decade in decades:
+        try:
+            start = int(decade.strip().rstrip("s"))
+        except ValueError:
+            continue
+        years.extend(range(start, start + 10))
+    return ",".join(map(str, years)) or None
 
 
 class JellyfinClient(BaseMediaClient):
-    """Client for interacting with Jellyfin media server via REST API."""
+    """Client for a Jellyfin server's music library."""
 
     def __init__(self, url: str, token: str, music_library: str = "Music"):
         self.url = url.rstrip("/")
-        self.token = token
         self.music_library_name = music_library
 
         self._connected = False
@@ -37,84 +44,57 @@ class JellyfinClient(BaseMediaClient):
         self._user_id: str | None = None
         self._library_id: str | None = None
 
-        self._headers = {
-            "Authorization": (
-                f'MediaBrowser Client="MediaSage", Device="Server", '
-                f'DeviceId="mediasage-server", Version="1.0.0", Token="{token}"'
-            ),
-            "Content-Type": "application/json",
-        }
+        self._http = httpx.Client(
+            base_url=self.url,
+            headers={
+                "Authorization": (
+                    f'MediaBrowser Client="MediaSage", Device="Server", '
+                    f'DeviceId="mediasage-server", Version="1.0.0", Token="{token}"'
+                ),
+            },
+            timeout=30.0,
+        )
 
-        self._connect()
+        if not url or not token:
+            self._error = "Jellyfin URL and token are required"
+        else:
+            self._connect()
 
     def _connect(self) -> None:
-        """Attempt to connect and fetch user + library IDs."""
-        if not self.url or not self.token:
-            self._error = "Jellyfin URL and token are required"
-            return
-
         try:
-            with httpx.Client(headers=self._headers, timeout=15.0) as client:
-                # API keys aren't tied to a specific user, so /Users/Me returns 400.
-                # Instead, list all users and pick the first administrator.
-                resp = client.get(f"{self.url}/Users")
-                resp.raise_for_status()
-                users = resp.json()
-                admin = next((u for u in users if u.get("Policy", {}).get("IsAdministrator")), None)
-                if admin:
-                    self._user_id = admin["Id"]
-                elif users:
-                    self._user_id = users[0]["Id"]
-                else:
-                    self._error = "No users found in Jellyfin"
-                    self._connected = False
-                    return
+            # API keys aren't tied to a user (/Users/Me returns 400), so act as the first admin
+            resp = self._http.get("/Users")
+            resp.raise_for_status()
+            users = resp.json()
+            if not users:
+                self._error = "No users found in Jellyfin"
+                return
+            admin = next((u for u in users if u.get("Policy", {}).get("IsAdministrator")), users[0])
+            self._user_id = admin["Id"]
 
-                # Find the music library
-                resp = client.get(f"{self.url}/Library/MediaFolders")
-                resp.raise_for_status()
-                folders = resp.json().get("Items", [])
+            resp = self._http.get("/Library/MediaFolders")
+            resp.raise_for_status()
+            folders = resp.json().get("Items", [])
+            wanted = self.music_library_name.lower()
+            library = next((f for f in folders if f.get("Name", "").lower() == wanted), None)
+            library = library or next((f for f in folders if f.get("CollectionType") == "music"), None)
+            if not library:
+                self._error = f"Music library '{self.music_library_name}' not found in Jellyfin"
+                return
 
-                # Look for a library matching the configured name
-                self._library_id = None
-                for folder in folders:
-                    if folder.get("Name", "").lower() == self.music_library_name.lower():
-                        self._library_id = folder["Id"]
-                        break
-
-                # If not found by exact name, take first music collection type
-                if not self._library_id:
-                    for folder in folders:
-                        if folder.get("CollectionType") == "music":
-                            self._library_id = folder["Id"]
-                            break
-
-                if not self._library_id:
-                    self._error = f"Music library '{self.music_library_name}' not found in Jellyfin"
-                    self._connected = False
-                    return
-
-                self._connected = True
-                self._error = None
-                logger.info(
-                    "Connected to Jellyfin: user_id=%s library_id=%s",
-                    self._user_id,
-                    self._library_id,
-                )
-
+            self._library_id = library["Id"]
+            self._connected = True
+            self._error = None
+            logger.info("Connected to Jellyfin: user_id=%s library_id=%s", self._user_id, self._library_id)
         except httpx.ConnectError:
             self._error = f"Cannot connect to Jellyfin server at {self.url}"
-            self._connected = False
         except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            if status == 401:
+            if e.response.status_code == 401:
                 self._error = "Invalid Jellyfin API key — unauthorized"
             else:
-                self._error = f"Jellyfin returned HTTP {status}"
-            self._connected = False
+                self._error = f"Jellyfin returned HTTP {e.response.status_code}"
         except Exception as e:
-            self._error = f"Jellyfin connection error: {str(e)}"
-            self._connected = False
+            self._error = f"Jellyfin connection error: {e}"
 
     def is_connected(self) -> bool:
         return self._connected
@@ -122,190 +102,140 @@ class JellyfinClient(BaseMediaClient):
     def get_error(self) -> str | None:
         return self._error
 
-    def get_music_libraries(self) -> list[str]:
-        """Get list of music library names from Jellyfin."""
-        if not self.url or not self.token:
-            return []
+    def _library_params(self, item_type: str = "Audio", **extra: Any) -> dict[str, Any]:
+        return {
+            "IncludeItemTypes": item_type,
+            "Recursive": "true",
+            "ParentId": self._library_id,
+            "UserId": self._user_id,
+            **extra,
+        }
+
+    def _filter_params(
+        self, genres: list[str] | None, decades: list[str] | None, **extra: Any
+    ) -> dict[str, Any]:
+        params = self._library_params(**extra)
+        if genres:
+            params["Genres"] = "|".join(genres)
+        if decades and (years := _years_param(decades)):
+            params["Years"] = years
+        return params
+
+    def _iter_items(self, params: dict[str, Any]) -> Iterator[dict]:
+        """Page through /Items. Raises on HTTP errors."""
+        start_index = 0
+        while True:
+            resp = self._http.get(
+                "/Items",
+                params={**params, "StartIndex": start_index, "Limit": PAGE_SIZE},
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("Items", [])
+            yield from items
+            start_index += len(items)
+            if not items or start_index >= data.get("TotalRecordCount", 0):
+                break
+
+    def _get_item(self, item_id: str, **params: Any) -> dict | None:
+        # /Items/{id} needs a user context, so look the item up by ID instead
         try:
-            with httpx.Client(headers=self._headers, timeout=10.0) as client:
-                resp = client.get(f"{self.url}/Library/MediaFolders")
-                resp.raise_for_status()
-                folders = resp.json().get("Items", [])
-                return [
-                    f["Name"]
-                    for f in folders
-                    if f.get("CollectionType") == "music"
-                ]
+            resp = self._http.get("/Items", params={"Ids": item_id, "UserId": self._user_id, **params})
+            resp.raise_for_status()
         except Exception as e:
-            logger.warning("Failed to get Jellyfin music libraries: %s", e)
-            return []
-
-    def get_library_stats(self) -> dict[str, Any]:
-        """Get statistics about the Jellyfin music library."""
-        if not self._connected or not self._library_id:
-            return {"total_tracks": 0, "genres": [], "decades": []}
-
-        try:
-            with httpx.Client(headers=self._headers, timeout=30.0) as client:
-                # Total track count
-                resp = client.get(
-                    f"{self.url}/Items",
-                    params={
-                        "IncludeItemTypes": "Audio",
-                        "Recursive": "true",
-                        "ParentId": self._library_id,
-                        "Limit": 0,
-                    },
-                )
-                resp.raise_for_status()
-                total_tracks = resp.json().get("TotalRecordCount", 0)
-
-                # Genres
-                resp = client.get(
-                    f"{self.url}/Genres",
-                    params={
-                        "IncludeItemTypes": "Audio",
-                        "Recursive": "true",
-                        "ParentId": self._library_id,
-                    },
-                )
-                resp.raise_for_status()
-                genre_items = resp.json().get("Items", [])
-                genres = sorted(
-                    [{"name": g["Name"], "count": None} for g in genre_items],
-                    key=lambda x: x["name"],
-                )
-
-                # Decades: derive from tracks' production years
-                resp = client.get(
-                    f"{self.url}/Items",
-                    params={
-                        "IncludeItemTypes": "Audio",
-                        "Recursive": "true",
-                        "ParentId": self._library_id,
-                        "Fields": "ProductionYear",
-                        "Limit": 50000,
-                    },
-                )
-                resp.raise_for_status()
-                items = resp.json().get("Items", [])
-                decade_set: set[str] = set()
-                for item in items:
-                    year = item.get("ProductionYear")
-                    if year:
-                        decade = f"{(year // 10) * 10}s"
-                        decade_set.add(decade)
-                decades = sorted([{"name": d, "count": None} for d in decade_set],
-                                 key=lambda x: x["name"])
-
-                return {
-                    "total_tracks": total_tracks,
-                    "genres": genres,
-                    "decades": decades,
-                }
-        except Exception as e:
-            logger.exception("Failed to get Jellyfin library stats: %s", e)
-            return {"total_tracks": 0, "genres": [], "decades": [], "error": str(e)}
-
-    def _fields_param(self) -> str:
-        """Standard Fields parameter for all item fetches."""
-        return "Genres,ProductionYear,RunTimeTicks,AlbumArtist,Album,Artists"
+            logger.warning("Failed to get Jellyfin item %s: %s", item_id, e)
+            return None
+        items = resp.json().get("Items", [])
+        return items[0] if items else None
 
     def _item_to_track(self, item: dict) -> Track:
-        """Convert a Jellyfin item dict to a Track model."""
-        item_id = item["Id"]
-        duration_ticks = item.get("RunTimeTicks") or 0
-        duration_ms = duration_ticks // 10000
-
         return Track(
-            rating_key=item_id,
+            rating_key=item["Id"],
             title=item.get("Name", ""),
             artist=item.get("AlbumArtist") or (item.get("Artists") or [""])[0],
             album=item.get("Album", ""),
-            duration_ms=duration_ms,
+            duration_ms=(item.get("RunTimeTicks") or 0) // 10_000,
             year=item.get("ProductionYear"),
             genres=item.get("Genres", []),
-            art_url=f"/api/art/{item_id}",
+            art_url=f"/api/art/{item['Id']}",
         )
 
-    def get_all_tracks(self) -> list[Track]:
-        """Get all tracks from the Jellyfin library."""
-        if not self._connected or not self._library_id:
-            return []
-
+    def get_music_libraries(self) -> list[str]:
         try:
-            tracks = []
-            start_index = 0
-            page_size = 1000
-
-            with httpx.Client(headers=self._headers, timeout=120.0) as client:
-                while True:
-                    resp = client.get(
-                        f"{self.url}/Items",
-                        params={
-                            "IncludeItemTypes": "Audio",
-                            "Recursive": "true",
-                            "ParentId": self._library_id,
-                            "Fields": self._fields_param(),
-                            "StartIndex": start_index,
-                            "Limit": page_size,
-                        },
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    items = data.get("Items", [])
-                    if not items:
-                        break
-                    tracks.extend(self._item_to_track(item) for item in items)
-                    if len(tracks) >= data.get("TotalRecordCount", 0):
-                        break
-                    start_index += page_size
-
-            return tracks
+            resp = self._http.get("/Library/MediaFolders", timeout=10.0)
+            resp.raise_for_status()
         except Exception as e:
-            logger.exception("Failed to get all Jellyfin tracks: %s", e)
+            logger.warning("Failed to get Jellyfin music libraries: %s", e)
             return []
+        return [f["Name"] for f in resp.json().get("Items", []) if f.get("CollectionType") == "music"]
+
+    def get_library_stats(self) -> dict[str, Any]:
+        """Count tracks, genres and decades from the tracks themselves.
+
+        Jellyfin's /Genres index can be empty for music libraries.
+        """
+        if not self._connected:
+            return {"total_tracks": 0, "genres": [], "decades": []}
+
+        genre_counts: dict[str, int] = {}
+        decade_counts: dict[str, int] = {}
+        total_tracks = 0
+        try:
+            for item in self._iter_items(self._library_params(Fields="Genres,ProductionYear")):
+                total_tracks += 1
+                for genre in item.get("Genres") or []:
+                    genre_counts[genre] = genre_counts.get(genre, 0) + 1
+                if year := item.get("ProductionYear"):
+                    decade = f"{year // 10 * 10}s"
+                    decade_counts[decade] = decade_counts.get(decade, 0) + 1
+        except Exception as e:
+            logger.exception("Failed to get Jellyfin library stats")
+            return {"total_tracks": 0, "genres": [], "decades": [], "error": str(e)}
+
+        return {
+            "total_tracks": total_tracks,
+            "genres": [{"name": g, "count": c} for g, c in sorted(genre_counts.items())],
+            "decades": [{"name": d, "count": c} for d, c in sorted(decade_counts.items())],
+        }
+
+    def get_all_tracks(self) -> list[Track]:
+        """Get every track in the library. Raises on failure."""
+        return [row["track"] for row in self.get_all_tracks_for_sync()]
+
+    def get_all_tracks_for_sync(self) -> list[dict[str, Any]]:
+        """Get every track with the album ID and play history the cache stores.
+
+        Raises on failure, so an interrupted sync keeps the previous cache.
+
+        Returns:
+            Dicts with track (Track), album_key, view_count and last_viewed_at
+        """
+        if not self._connected:
+            raise RuntimeError(self._error or "Not connected to Jellyfin")
+
+        rows = []
+        for item in self._iter_items(self._library_params(Fields=TRACK_FIELDS)):
+            user_data = item.get("UserData") or {}
+            rows.append({
+                "track": self._item_to_track(item),
+                "album_key": item.get("AlbumId") or "",
+                "view_count": user_data.get("PlayCount") or 0,
+                "last_viewed_at": user_data.get("LastPlayedDate"),
+            })
+        return rows
 
     def get_all_albums_metadata(self) -> dict[str, dict[str, Any]]:
-        """Fetch all albums and return mapping of album_id -> metadata."""
-        if not self._connected or not self._library_id:
+        if not self._connected:
             return {}
-
         try:
-            result = {}
-            start_index = 0
-            page_size = 1000
-
-            with httpx.Client(headers=self._headers, timeout=120.0) as client:
-                while True:
-                    resp = client.get(
-                        f"{self.url}/Items",
-                        params={
-                            "IncludeItemTypes": "MusicAlbum",
-                            "Recursive": "true",
-                            "ParentId": self._library_id,
-                            "Fields": "Genres,ProductionYear",
-                            "StartIndex": start_index,
-                            "Limit": page_size,
-                        },
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    items = data.get("Items", [])
-                    if not items:
-                        break
-                    for item in items:
-                        result[item["Id"]] = {
-                            "genres": item.get("Genres", []),
-                            "year": item.get("ProductionYear"),
-                        }
-                    if len(result) >= data.get("TotalRecordCount", 0):
-                        break
-                    start_index += page_size
-
-            return result
-        except Exception as e:
-            logger.exception("Failed to get Jellyfin album metadata: %s", e)
+            params = self._library_params("MusicAlbum", Fields="Genres,ProductionYear")
+            return {
+                item["Id"]: {"genres": item.get("Genres", []), "year": item.get("ProductionYear")}
+                for item in self._iter_items(params)
+            }
+        except Exception:
+            logger.exception("Failed to get Jellyfin album metadata")
             return {}
 
     def get_tracks_by_filters(
@@ -316,146 +246,60 @@ class JellyfinClient(BaseMediaClient):
         min_rating: int = 0,
         limit: int = 0,
     ) -> list[Track]:
-        """Get tracks matching filter criteria from Jellyfin."""
-        if not self._connected or not self._library_id:
+        """Get tracks matching the filters. Jellyfin has no star ratings, so min_rating is ignored."""
+        if not self._connected:
             return []
 
+        tracks = []
         try:
-            params: dict[str, Any] = {
-                "IncludeItemTypes": "Audio",
-                "Recursive": "true",
-                "ParentId": self._library_id,
-                "Fields": self._fields_param(),
-            }
-
-            if genres:
-                params["Genres"] = "|".join(genres)
-
-            if decades:
-                years: list[int] = []
-                for decade in decades:
-                    years.extend(_decade_to_years(decade))
-                if years:
-                    params["Years"] = ",".join(str(y) for y in years)
-
-            tracks = []
-            start_index = 0
-            page_size = 1000
-            fetch_limit = limit if limit > 0 else None
-
-            with httpx.Client(headers=self._headers, timeout=120.0) as client:
-                while True:
-                    page_params = dict(params)
-                    page_params["StartIndex"] = start_index
-                    page_params["Limit"] = page_size
-
-                    resp = client.get(f"{self.url}/Items", params=page_params)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    items = data.get("Items", [])
-                    if not items:
-                        break
-
-                    for item in items:
-                        track = self._item_to_track(item)
-                        if exclude_live and is_live_track(track.title, track.album):
-                            continue
-                        tracks.append(track)
-                        if fetch_limit and len(tracks) >= fetch_limit:
-                            return tracks
-
-                    total = data.get("TotalRecordCount", 0)
-                    start_index += page_size
-                    if start_index >= total:
-                        break
-
-            return tracks
-        except Exception as e:
-            logger.exception("Failed to get Jellyfin filtered tracks: %s", e)
+            for item in self._iter_items(self._filter_params(genres, decades, Fields=TRACK_FIELDS)):
+                track = self._item_to_track(item)
+                if exclude_live and is_live_track(track.title, track.album):
+                    continue
+                tracks.append(track)
+                if limit and len(tracks) >= limit:
+                    break
+        except Exception:
+            logger.exception("Failed to get Jellyfin filtered tracks")
             return []
+        return tracks
 
-    def get_random_tracks(
-        self,
-        count: int,
-        exclude_live: bool = True,
-    ) -> list[Track]:
-        """Get random tracks from the Jellyfin library."""
-        if not self._connected or not self._library_id:
+    def get_random_tracks(self, count: int, exclude_live: bool = True) -> list[Track]:
+        if not self._connected:
             return []
-
+        # Over-fetch so enough are left after dropping live tracks
+        params = self._library_params(
+            Fields=TRACK_FIELDS, SortBy="Random", Limit=count * 3 if exclude_live else count
+        )
         try:
-            with httpx.Client(headers=self._headers, timeout=30.0) as client:
-                # Fetch a larger pool and randomly sample
-                resp = client.get(
-                    f"{self.url}/Items",
-                    params={
-                        "IncludeItemTypes": "Audio",
-                        "Recursive": "true",
-                        "ParentId": self._library_id,
-                        "Fields": self._fields_param(),
-                        "SortBy": "Random",
-                        "Limit": count * 3 if exclude_live else count,
-                    },
-                )
-                resp.raise_for_status()
-                items = resp.json().get("Items", [])
-
-                tracks = []
-                for item in items:
-                    track = self._item_to_track(item)
-                    if exclude_live and is_live_track(track.title, track.album):
-                        continue
-                    tracks.append(track)
-                    if len(tracks) >= count:
-                        break
-
-                return tracks
-        except Exception as e:
-            logger.exception("Failed to get random Jellyfin tracks: %s", e)
+            resp = self._http.get("/Items", params=params)
+            resp.raise_for_status()
+        except Exception:
+            logger.exception("Failed to get random Jellyfin tracks")
             return []
+
+        tracks = [self._item_to_track(item) for item in resp.json().get("Items", [])]
+        if exclude_live:
+            tracks = [t for t in tracks if not is_live_track(t.title, t.album)]
+        return tracks[:count]
 
     def get_track_by_key(self, rating_key: str) -> Track | None:
-        """Get a single track by its Jellyfin item ID."""
-        if not self._connected:
+        if not self._connected or not _ITEM_ID_RE.match(rating_key):
             return None
-
-        try:
-            with httpx.Client(headers=self._headers, timeout=10.0) as client:
-                resp = client.get(
-                    f"{self.url}/Items/{rating_key}",
-                    params={"Fields": "Genres,ProductionYear,RunTimeTicks,AlbumArtist,Album,Artists"},
-                )
-                resp.raise_for_status()
-                item = resp.json()
-                return self._item_to_track(item)
-        except Exception as e:
-            logger.warning("Failed to get Jellyfin track %s: %s", rating_key, e)
-            return None
+        item = self._get_item(rating_key, Fields=TRACK_FIELDS)
+        return self._item_to_track(item) if item else None
 
     def search_tracks(self, query: str) -> list[Track]:
-        """Search for tracks by title or artist in Jellyfin."""
-        if not self._connected or not self._library_id:
+        if not self._connected:
             return []
-
+        params = self._library_params(SearchTerm=query, Fields=TRACK_FIELDS, Limit=50)
         try:
-            with httpx.Client(headers=self._headers, timeout=15.0) as client:
-                resp = client.get(
-                    f"{self.url}/Items",
-                    params={
-                        "IncludeItemTypes": "Audio",
-                        "Recursive": "true",
-                        "ParentId": self._library_id,
-                        "SearchTerm": query,
-                        "Fields": "Genres,ProductionYear,RunTimeTicks,AlbumArtist,Album,Artists",
-                        "Limit": 50,
-                    },
-                )
-                resp.raise_for_status()
-                items = resp.json().get("Items", [])
-                return [self._item_to_track(item) for item in items]
+            resp = self._http.get("/Items", params=params)
+            resp.raise_for_status()
         except Exception as e:
             logger.warning("Failed to search Jellyfin tracks: %s", e)
             return []
+        return [self._item_to_track(item) for item in resp.json().get("Items", [])]
 
     def count_tracks_by_filters(
         self,
@@ -464,85 +308,43 @@ class JellyfinClient(BaseMediaClient):
         exclude_live: bool = True,
         min_rating: int = 0,
     ) -> int:
-        """Count tracks matching filters. Uses full fetch when exclude_live is needed."""
-        if not self._connected or not self._library_id:
+        if not self._connected:
             return 0
-
+        # Jellyfin can't filter out live tracks, so counting them needs the full list
         if exclude_live:
-            # No server-side live filter; must fetch and count
-            tracks = self.get_tracks_by_filters(
-                genres=genres,
-                decades=decades,
-                exclude_live=True,
-                min_rating=min_rating,
-                limit=0,
-            )
-            return len(tracks)
-
+            return len(self.get_tracks_by_filters(genres, decades, exclude_live=True))
         try:
-            params: dict[str, Any] = {
-                "IncludeItemTypes": "Audio",
-                "Recursive": "true",
-                "ParentId": self._library_id,
-                "Limit": 0,
-            }
-            if genres:
-                params["Genres"] = "|".join(genres)
-            if decades:
-                years: list[int] = []
-                for decade in decades:
-                    years.extend(_decade_to_years(decade))
-                if years:
-                    params["Years"] = ",".join(str(y) for y in years)
-
-            with httpx.Client(headers=self._headers, timeout=30.0) as client:
-                resp = client.get(f"{self.url}/Items", params=params)
-                resp.raise_for_status()
-                return resp.json().get("TotalRecordCount", 0)
+            resp = self._http.get("/Items", params=self._filter_params(genres, decades, Limit=0))
+            resp.raise_for_status()
         except Exception as e:
             logger.warning("Failed to count Jellyfin tracks: %s", e)
             return 0
+        return resp.json().get("TotalRecordCount", 0)
 
-    def create_playlist(
-        self,
-        name: str,
-        rating_keys: list[str],
-        description: str = "",
-    ) -> dict[str, Any]:
-        """Create a playlist in Jellyfin."""
-        if not self._connected or not self._user_id:
+    def create_playlist(self, name: str, rating_keys: list[str], description: str = "") -> dict[str, Any]:
+        """Create a playlist. Jellyfin playlists have no description, so it's ignored."""
+        if not self._connected:
             return {"success": False, "error": "Not connected to Jellyfin"}
-
         try:
-            with httpx.Client(headers=self._headers, timeout=30.0) as client:
-                # Create playlist
-                body = {
-                    "Name": name,
-                    "Ids": rating_keys,
-                    "UserId": self._user_id,
-                    "MediaType": "Audio",
-                }
-                resp = client.post(f"{self.url}/Playlists", json=body)
-                resp.raise_for_status()
-                playlist_data = resp.json()
-                playlist_id = playlist_data.get("Id") or playlist_data.get("id")
-
-                if not playlist_id:
-                    return {"success": False, "error": "Playlist created but no ID returned"}
-
-                # Note: Jellyfin doesn't have a built-in description field for playlists
-                # in the same way Plex does; we skip setting it silently.
-
-                return {
-                    "success": True,
-                    "playlist_id": playlist_id,
-                    "playlist_url": None,
-                    "tracks_added": len(rating_keys),
-                    "tracks_skipped": 0,
-                }
+            resp = self._http.post(
+                "/Playlists",
+                json={"Name": name, "Ids": rating_keys, "UserId": self._user_id, "MediaType": "Audio"},
+            )
+            resp.raise_for_status()
         except Exception as e:
             logger.exception("Failed to create Jellyfin playlist '%s'", name)
             return {"success": False, "error": str(e)}
+
+        playlist_id = resp.json().get("Id")
+        if not playlist_id:
+            return {"success": False, "error": "Playlist created but no ID returned"}
+        return {
+            "success": True,
+            "playlist_id": playlist_id,
+            "playlist_url": None,
+            "tracks_added": len(rating_keys),
+            "tracks_skipped": 0,
+        }
 
     def update_playlist(
         self,
@@ -551,122 +353,148 @@ class JellyfinClient(BaseMediaClient):
         mode: str = "replace",
         description: str = "",
     ) -> dict[str, Any]:
-        """Update a Jellyfin playlist by replacing or appending tracks."""
-        if not self._connected or not self._user_id:
+        """Replace or append a playlist's tracks.
+
+        Handles the __scratch__ sentinel for "MediaSage - Now Playing", like PlexClient.
+        """
+        if not self._connected:
             return {"success": False, "error": "Not connected to Jellyfin"}
+        if mode not in ("replace", "append"):
+            return {"success": False, "error": f"Unknown update mode: {mode}"}
 
         try:
-            with httpx.Client(headers=self._headers, timeout=30.0) as client:
-                if mode == "replace":
-                    # Remove all existing items, then add new ones
-                    items_resp = client.get(
-                        f"{self.url}/Playlists/{playlist_id}/Items",
-                        params={"UserId": self._user_id},
-                    )
-                    items_resp.raise_for_status()
-                    existing_items = items_resp.json().get("Items", [])
-                    existing_ids = [item["PlaylistItemId"] for item in existing_items if "PlaylistItemId" in item]
+            if playlist_id == "__scratch__":
+                playlist_id = self._find_playlist_id(SCRATCH_PLAYLIST_TITLE)
+                if not playlist_id:
+                    created = self.create_playlist(SCRATCH_PLAYLIST_TITLE, rating_keys)
+                    if not created["success"]:
+                        return created
+                    return {
+                        "success": True,
+                        "tracks_added": created["tracks_added"],
+                        "tracks_skipped": 0,
+                        "duplicates_skipped": 0,
+                        "playlist_url": None,
+                    }
+            elif not _ITEM_ID_RE.match(playlist_id):
+                return {"success": False, "error": "Invalid playlist ID"}
 
-                    if existing_ids:
-                        del_resp = client.delete(
-                            f"{self.url}/Playlists/{playlist_id}/Items",
-                            params={"EntryIds": ",".join(existing_ids)},
-                        )
-                        del_resp.raise_for_status()
+            entries = self._get_playlist_entries(playlist_id)
+            if mode == "append":
+                existing = {item_id for _, item_id in entries}
+                to_add = [key for key in rating_keys if key not in existing]
+            else:
+                to_add = rating_keys
+                # Jellyfin won't add an item that's already in the playlist, so clear it first
+                if entries:
+                    self._remove_playlist_entries(playlist_id, [entry_id for entry_id, _ in entries])
 
-                # Add new tracks
-                add_resp = client.post(
-                    f"{self.url}/Playlists/{playlist_id}/Items",
-                    params={
-                        "Ids": ",".join(rating_keys),
-                        "UserId": self._user_id,
-                    },
-                )
-                add_resp.raise_for_status()
-
-                return {
-                    "success": True,
-                    "tracks_added": len(rating_keys),
-                    "tracks_skipped": 0,
-                    "duplicates_skipped": 0,
-                    "playlist_url": None,
-                }
+            if to_add:
+                try:
+                    self._add_playlist_items(playlist_id, to_add)
+                except Exception:
+                    if mode == "replace" and entries:
+                        logger.warning("Adding tracks failed; restoring playlist %s", playlist_id)
+                        self._add_playlist_items(playlist_id, [item_id for _, item_id in entries])
+                    raise
         except Exception as e:
             logger.exception("Failed to update Jellyfin playlist %s", playlist_id)
             return {"success": False, "error": str(e)}
 
+        return {
+            "success": True,
+            "tracks_added": len(to_add),
+            "tracks_skipped": 0,
+            "duplicates_skipped": len(rating_keys) - len(to_add),
+            "playlist_url": None,
+        }
+
+    def _find_playlist_id(self, title: str) -> str | None:
+        params = {"IncludeItemTypes": "Playlist", "Recursive": "true", "UserId": self._user_id, "SearchTerm": title}
+        resp = self._http.get("/Items", params=params)
+        resp.raise_for_status()
+        return next((item["Id"] for item in resp.json().get("Items", []) if item.get("Name") == title), None)
+
+    def _get_playlist_entries(self, playlist_id: str) -> list[tuple[str, str]]:
+        """Return (playlist entry ID, item ID) pairs."""
+        resp = self._http.get(f"/Playlists/{playlist_id}/Items", params={"UserId": self._user_id})
+        resp.raise_for_status()
+        return [
+            (item["PlaylistItemId"], item["Id"])
+            for item in resp.json().get("Items", [])
+            if "PlaylistItemId" in item
+        ]
+
+    def _remove_playlist_entries(self, playlist_id: str, entry_ids: list[str]) -> None:
+        resp = self._http.delete(f"/Playlists/{playlist_id}/Items", params={"EntryIds": ",".join(entry_ids)})
+        resp.raise_for_status()
+
+    def _add_playlist_items(self, playlist_id: str, item_ids: list[str]) -> None:
+        params = {"Ids": ",".join(item_ids), "UserId": self._user_id}
+        resp = self._http.post(f"/Playlists/{playlist_id}/Items", params=params)
+        resp.raise_for_status()
+
     def get_playlists(self) -> list[PlexPlaylistInfo]:
-        """Get all audio playlists from Jellyfin."""
-        if not self._connected or not self._user_id:
+        if not self._connected:
             return []
-
+        params = {"IncludeItemTypes": "Playlist", "Recursive": "true", "UserId": self._user_id, "Fields": "ChildCount"}
         try:
-            with httpx.Client(headers=self._headers, timeout=15.0) as client:
-                resp = client.get(
-                    f"{self.url}/Items",
-                    params={
-                        "IncludeItemTypes": "Playlist",
-                        "Recursive": "true",
-                        "UserId": self._user_id,
-                        "Fields": "ChildCount",
-                    },
-                )
-                resp.raise_for_status()
-                items = resp.json().get("Items", [])
-
-                result = []
-                for item in items:
-                    # Filter to audio playlists (MediaType == Audio or no restriction)
-                    media_type = item.get("MediaType", "")
-                    if media_type and media_type.lower() not in ("audio", ""):
-                        continue
-                    result.append(PlexPlaylistInfo(
-                        rating_key=item["Id"],
-                        title=item["Name"],
-                        track_count=item.get("ChildCount", 0),
-                    ))
-                return sorted(result, key=lambda p: p.title.lower())
-        except Exception as e:
-            logger.exception("Failed to get Jellyfin playlists: %s", e)
+            resp = self._http.get("/Items", params=params)
+            resp.raise_for_status()
+        except Exception:
+            logger.exception("Failed to get Jellyfin playlists")
             return []
+
+        playlists = [
+            PlexPlaylistInfo(rating_key=item["Id"], title=item["Name"], track_count=item.get("ChildCount", 0))
+            for item in resp.json().get("Items", [])
+            # Imported .m3u playlists report MediaType "Unknown"; skip only video ones
+            if (item.get("MediaType") or "").lower() != "video"
+        ]
+        return sorted(playlists, key=lambda p: p.title.lower())
 
     def get_art_url(self, item_id: str) -> str | None:
-        """Get the direct art URL for a Jellyfin item.
+        """Get the image URL for a track or album, which main.py proxies.
 
-        Returns the full Jellyfin URL for the primary image, which main.py will proxy.
+        Falls back to the album's image, since most tracks have none of their own.
         """
-        if not self._connected or not self.url:
+        if not self._connected or not _ITEM_ID_RE.match(item_id):
             return None
-        return f"{self.url}/Items/{item_id}/Images/Primary"
+        item = self._get_item(item_id)
+        if not item:
+            return None
+        if (item.get("ImageTags") or {}).get("Primary"):
+            return f"{self.url}/Items/{item_id}/Images/Primary"
+        if item.get("AlbumId") and item.get("AlbumPrimaryImageTag"):
+            return f"{self.url}/Items/{item['AlbumId']}/Images/Primary"
+        return None
+
+    def _system_info(self) -> dict:
+        try:
+            resp = self._http.get("/System/Info", timeout=10.0)
+            resp.raise_for_status()
+        except Exception:
+            return {}
+        return resp.json()
 
     def get_machine_identifier(self) -> str | None:
-        """Get the Jellyfin server ID (for library cache server-change detection)."""
-        try:
-            with httpx.Client(headers=self._headers, timeout=10.0) as client:
-                resp = client.get(f"{self.url}/System/Info")
-                resp.raise_for_status()
-                return resp.json().get("Id")
-        except Exception:
-            return None
+        """Server ID, used to detect a server change for the library cache."""
+        return self._system_info().get("Id")
 
     def get_server_name(self) -> str | None:
-        """Get the Jellyfin server name."""
-        try:
-            with httpx.Client(headers=self._headers, timeout=10.0) as client:
-                resp = client.get(f"{self.url}/System/Info")
-                resp.raise_for_status()
-                return resp.json().get("ServerName")
-        except Exception:
-            return None
+        return self._system_info().get("ServerName")
+
+    def close(self) -> None:
+        self._http.close()
 
 
 def get_jellyfin_client() -> JellyfinClient | None:
-    """Get the global Jellyfin client instance."""
     return _jellyfin_client
 
 
 def init_jellyfin_client(url: str, token: str, music_library: str = "Music") -> JellyfinClient:
-    """Initialize the global Jellyfin client."""
     global _jellyfin_client
+    if _jellyfin_client:
+        _jellyfin_client.close()
     _jellyfin_client = JellyfinClient(url, token, music_library)
     return _jellyfin_client

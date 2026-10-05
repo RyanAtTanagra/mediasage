@@ -169,12 +169,12 @@ def generate_playlist_stream(
     try:
         logger.info("Starting playlist generation (streaming)")
         llm_client = get_llm_client()
-        plex_client = get_current_media_client()
+        media_client = get_current_media_client()
 
         if not llm_client:
             yield emit("error", {"message": "LLM client not initialized"})
             return
-        if not plex_client:
+        if not media_client:
             yield emit("error", {"message": "Media server not connected"})
             return
 
@@ -193,7 +193,7 @@ def generate_playlist_stream(
                     genres, decades, min_rating, using_cache)
         try:
             filtered_tracks = _get_tracks_from_cache_or_plex(
-                plex_client=plex_client,
+                plex_client=media_client,
                 genres=genres,
                 decades=decades,
                 exclude_live=exclude_live,

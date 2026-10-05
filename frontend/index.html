@@ -110,7 +110,7 @@
                                     <div class="form-group">
                                         <label for="setup-jellyfin-token">API Key</label>
                                         <input type="password" id="setup-jellyfin-token" placeholder="Your Jellyfin API key">
-                                        <p class="setup-field-hint">Create an API key in Jellyfin: Dashboard &rarr; Advanced &rarr; API Keys</p>
+                                        <p class="setup-field-hint">Create an API key in Jellyfin: Dashboard &rarr; API Keys</p>
                                     </div>
                                     <div class="form-group">
                                         <label for="setup-jellyfin-library">Music Library</label>
@@ -464,7 +464,7 @@
                                 <div class="results-header-actions">
                                     <div class="split-button-group">
                                         <button id="save-playlist-btn" class="btn btn-primary split-button-main">
-                                            <span class="btn-label-long" id="save-playlist-btn-label">Save to Library</span><span class="btn-label-short">Save</span>
+                                            <span class="btn-label-long">Save to Library</span><span class="btn-label-short">Save</span>
                                         </button>
                                         <button id="save-mode-dropdown-btn" class="btn btn-primary split-button-arrow" aria-label="Save mode options" aria-expanded="false">
                                             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 5L6 8L9 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -680,6 +680,9 @@
                             <option value="plex">Plex</option>
                             <option value="jellyfin">Jellyfin</option>
                         </select>
+                        <p id="media-server-env-warning" class="env-warning hidden">
+                            Set by <code>MEDIA_SERVER</code> environment variable. Edit <code>.env</code> to change.
+                        </p>
                     </div>
                     <!-- Plex settings -->
                     <div id="settings-plex-fields">
@@ -713,7 +716,7 @@
                         <div class="form-group">
                             <label for="jellyfin-token">API Key</label>
                             <input type="password" id="jellyfin-token" placeholder="Your Jellyfin API key">
-                            <p class="setup-field-hint">Create an API key in Jellyfin: Dashboard &rarr; Advanced &rarr; API Keys</p>
+                            <p class="setup-field-hint">Create an API key in Jellyfin: Dashboard &rarr; API Keys</p>
                         </div>
                         <div class="form-group">
                             <label for="jellyfin-music-library">Music Library</label>

@@ -7,7 +7,9 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+from backend.jellyfin_client import get_jellyfin_client
 from backend.models import AppConfig, DefaultsConfig, JellyfinConfig, LLMConfig, PlexConfig
+from backend.plex_client import get_plex_client
 
 # Load .env file (if it exists) - env vars take priority
 load_dotenv()
@@ -213,18 +215,10 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         ),
     )
 
-    # Determine media server: env var > yaml > auto-detect > default "plex"
-    media_server_yaml = yaml_config.get("media_server")
-    media_server_env = os.environ.get("MEDIA_SERVER")
-    if media_server_env:
-        media_server = media_server_env
-    elif media_server_yaml:
-        media_server = media_server_yaml
-    elif jellyfin_config.url and not plex_config.url:
-        # Auto-detect: Jellyfin URL set but not Plex
-        media_server = "jellyfin"
-    else:
-        media_server = "plex"
+    # MEDIA_SERVER env > YAML > Jellyfin if it's the only server configured > Plex
+    media_server = os.environ.get("MEDIA_SERVER") or yaml_config.get("media_server")
+    if not media_server:
+        media_server = "jellyfin" if jellyfin_config.url and not plex_config.url else "plex"
 
     # Get local provider settings
     ollama_url = get_env_or_yaml(
@@ -329,10 +323,7 @@ def update_config_values(updates: dict[str, Any]) -> AppConfig:
     plex_updates = {}
     jellyfin_updates = {}
     llm_updates = {}
-    top_level_updates = {}
-
-    if "media_server" in updates and updates["media_server"]:
-        top_level_updates["media_server"] = updates["media_server"]
+    media_server = updates.get("media_server")
 
     if "plex_url" in updates and updates["plex_url"]:
         plex_updates["url"] = updates["plex_url"]
@@ -391,10 +382,9 @@ def update_config_values(updates: dict[str, Any]) -> AppConfig:
     new_plex = _config.plex.model_copy(update=plex_updates)
     new_jellyfin = _config.jellyfin.model_copy(update=jellyfin_updates)
     new_llm = _config.llm.model_copy(update=llm_updates)
-    new_media_server = top_level_updates.get("media_server", _config.media_server)
 
     _config = AppConfig(
-        media_server=new_media_server,
+        media_server=media_server or _config.media_server,
         plex=new_plex,
         jellyfin=new_jellyfin,
         llm=new_llm,
@@ -403,8 +393,8 @@ def update_config_values(updates: dict[str, Any]) -> AppConfig:
 
     # Persist to user config file
     user_updates: dict[str, Any] = {}
-    if top_level_updates:
-        user_updates.update(top_level_updates)
+    if media_server:
+        user_updates["media_server"] = media_server
     if plex_updates:
         user_updates["plex"] = plex_updates
     if jellyfin_updates:
@@ -419,16 +409,7 @@ def update_config_values(updates: dict[str, Any]) -> AppConfig:
 
 
 def get_current_media_client():
-    """Get the media client for the currently configured media server.
-
-    Returns:
-        PlexClient or JellyfinClient based on config.media_server.
-        Returns None if the relevant server is not configured.
-    """
-    config = get_config()
-    if config.media_server == "jellyfin":
-        from backend.jellyfin_client import get_jellyfin_client
+    """Return the Plex or Jellyfin client for the configured media server, or None."""
+    if get_config().media_server == "jellyfin":
         return get_jellyfin_client()
-    else:
-        from backend.plex_client import get_plex_client
-        return get_plex_client()
+    return get_plex_client()

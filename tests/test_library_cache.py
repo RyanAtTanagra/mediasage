@@ -680,3 +680,121 @@ class TestSyncLibrary:
         keys = {t["rating_key"] for t in library_cache.get_cached_tracks()}
         assert keys == {"1", "2", "3"}
         assert library_cache.get_sync_state()["track_count"] == 3
+
+
+class TestReplaceLibrary:
+    """Switching media servers replaces the cache, even while a sync is running."""
+
+    @pytest.fixture(autouse=True)
+    def reset_switch_state(self, monkeypatch):
+        monkeypatch.setattr(library_cache, "_sync_state", {
+            "is_syncing": False, "phase": None, "current": 0, "total": 0, "error": None,
+        })
+        monkeypatch.setattr(library_cache, "_cache_from_previous_server", False)
+        library_cache._cancel_sync.clear()
+        yield
+        library_cache._cancel_sync.clear()
+
+    class FakeClient:
+        """Minimal Jellyfin-style client whose tracks carry a per-server prefix."""
+
+        def __init__(self, prefix, count=3, on_fetch=None):
+            self.prefix = prefix
+            self.count = count
+            self.on_fetch = on_fetch
+
+        def is_connected(self):
+            return True
+
+        def get_machine_identifier(self):
+            return f"{self.prefix}-server"
+
+        def get_all_tracks_for_sync(self):
+            if self.on_fetch:
+                self.on_fetch()
+            from backend.models import Track
+            return [
+                {
+                    "track": Track(rating_key=f"{self.prefix}{i}", title=f"T{i}", artist="A", album="B", duration_ms=1),
+                    "album_key": "album",
+                    "view_count": 0,
+                    "last_viewed_at": None,
+                }
+                for i in range(self.count)
+            ]
+
+    def _keys(self):
+        return {t["rating_key"] for t in library_cache.get_cached_tracks()}
+
+    def test_invalidated_cache_is_not_used(self, initialized_db):
+        library_cache.sync_library(self.FakeClient("plex"))
+        assert library_cache.has_cached_tracks()
+
+        library_cache.invalidate_cache()
+
+        assert not library_cache.has_cached_tracks()
+
+    def test_replace_clears_and_syncs_current_server(self, initialized_db):
+        library_cache.sync_library(self.FakeClient("plex"))
+        switch = library_cache.invalidate_cache()
+
+        library_cache.replace_library(lambda: self.FakeClient("jf", count=2), switch)
+
+        assert self._keys() == {"jf0", "jf1"}
+        assert library_cache.has_cached_tracks()
+
+    def test_cancelled_sync_rolls_back(self, initialized_db, monkeypatch):
+        library_cache.sync_library(self.FakeClient("plex"))
+        monkeypatch.setattr(library_cache, "SYNC_BATCH_SIZE", 2)
+
+        # Same server, so the old tracks stay until the new sync commits
+        result = library_cache.sync_library(
+            self.FakeClient("plex", count=10, on_fetch=library_cache._cancel_sync.set)
+        )
+
+        assert result == {"success": False, "error": "Sync cancelled"}
+        assert library_cache.get_sync_state()["error"] is None
+        assert self._keys() == {"plex0", "plex1", "plex2"}
+
+    def test_switch_during_sync_ends_on_latest_server(self, initialized_db):
+        import threading
+
+        current = {"client": None}
+        fetch_started = threading.Event()
+        release_fetch = threading.Event()
+
+        def slow_fetch():
+            fetch_started.set()
+            release_fetch.wait(5)
+
+        current["client"] = self.FakeClient("plex", on_fetch=slow_fetch)
+        first = threading.Thread(target=library_cache.sync_library, args=(current["client"],))
+        first.start()
+        fetch_started.wait(5)
+
+        # Switch to Jellyfin while the Plex sync is still fetching
+        current["client"] = self.FakeClient("jf", count=2)
+        switch = library_cache.invalidate_cache()
+        second = threading.Thread(target=library_cache.replace_library, args=(lambda: current["client"], switch))
+        second.start()
+        release_fetch.set()
+        first.join(5)
+        second.join(5)
+
+        assert self._keys() == {"jf0", "jf1"}
+
+    def test_only_latest_switch_syncs(self, initialized_db):
+        stale_switch = library_cache.invalidate_cache()
+        latest_switch = library_cache.invalidate_cache()
+        synced = []
+
+        def client(name):
+            def get():
+                synced.append(name)
+                return self.FakeClient(name)
+            return get
+
+        library_cache.replace_library(client("stale"), stale_switch)
+        library_cache.replace_library(client("latest"), latest_switch)
+
+        assert synced == ["latest"]
