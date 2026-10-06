@@ -384,6 +384,8 @@ function generatePlaylistStream(request, onProgress, onComplete, onError) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let currentEvent = null;
+        let currentData = '';
 
         function processStream() {
             reader.read().then(({ done, value }) => {
@@ -400,8 +402,6 @@ function generatePlaylistStream(request, onProgress, onComplete, onError) {
                 // SSE parsing: accumulate data until blank line signals end of event.
                 // This prevents failures when large data lines are split across chunks.
                 // See: https://html.spec.whatwg.org/multipage/server-sent-events.html
-                let currentEvent = null;
-                let currentData = '';
                 for (const line of lines) {
                     if (line.startsWith('event: ')) {
                         currentEvent = line.slice(7);
@@ -4696,6 +4696,8 @@ async function handleRecGenerate() {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let currentEventType = '';
+        let currentData = '';
 
         while (true) {
             const { done, value } = await reader.read();
@@ -4706,8 +4708,6 @@ async function handleRecGenerate() {
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
 
-            let currentEventType = '';
-            let currentData = '';
             for (const line of lines) {
                 if (line.startsWith('event: ')) {
                     currentEventType = line.slice(7).trim();
