@@ -193,7 +193,8 @@ def init_schema(conn: sqlite3.Connection) -> bool:
     # sync_started_at = a full sync is running (still set at startup = the process died mid-sync,
     # re-sync); incremental_at = watermark of the last successful sync (full or incremental) for the next
     # incremental one. Neither is a data migration (no re-sync just for adding them).
-    for column in ("sync_started_at TEXT", "incremental_at TEXT"):
+    # library_id = the music library the cache was synced from (NULL on caches older than the column).
+    for column in ("sync_started_at TEXT", "incremental_at TEXT", "library_id TEXT"):
         try:
             conn.execute(f"ALTER TABLE sync_state ADD COLUMN {column}")
         except sqlite3.OperationalError:
@@ -227,7 +228,10 @@ def ensure_db_initialized() -> sqlite3.Connection:
     if not _schema_initialized:
         with _schema_lock:
             if not _schema_initialized:
-                _migration_applied = init_schema(conn)
+                migrated = init_schema(conn)
+                # A new or empty database has nothing to rebuild
+                has_tracks = conn.execute("SELECT 1 FROM tracks LIMIT 1").fetchone() is not None
+                _migration_applied = migrated and has_tracks
                 _schema_initialized = True
 
     return conn
@@ -242,8 +246,8 @@ def get_sync_state() -> dict[str, Any]:
     conn = ensure_db_initialized()
     try:
         row = conn.execute(
-            "SELECT plex_server_id, last_sync_at, track_count, sync_duration_ms, sync_started_at, incremental_at "
-            "FROM sync_state WHERE id = 1"
+            "SELECT plex_server_id, library_id, last_sync_at, track_count, sync_duration_ms, sync_started_at, "
+            "incremental_at FROM sync_state WHERE id = 1"
         ).fetchone()
 
         # Snapshot sync state under lock for consistent reads
@@ -254,6 +258,7 @@ def get_sync_state() -> dict[str, Any]:
             "track_count": row["track_count"] if row else 0,
             "synced_at": row["last_sync_at"] if row else None,
             "plex_server_id": row["plex_server_id"] if row else None,
+            "library_id": row["library_id"] if row else None,
             "sync_duration_ms": row["sync_duration_ms"] if row else None,
             "is_syncing": ss["is_syncing"],
             "sync_progress": None,
@@ -466,22 +471,32 @@ def is_cache_stale(max_age_hours: float = 24) -> bool:
         return True
 
 
-def check_server_changed(current_server_id: str) -> bool:
-    """Check if Plex server has changed since last sync.
+def check_server_changed(current_server_id: str, current_library_id: str | None = None) -> bool:
+    """Check if the cache holds a different server's library, or a different music library on the same server.
 
     Args:
-        current_server_id: Current Plex server's machineIdentifier
+        current_server_id: Current server's identifier (Plex machineIdentifier, Jellyfin server Id)
+        current_library_id: Current music library's identifier, if the client knows it
 
     Returns:
-        True if server changed (cache should be cleared)
+        True if the server or library changed (cache should be cleared)
     """
     state = get_sync_state()
     cached_server_id = state.get("plex_server_id")
 
     if not cached_server_id:
         return False  # First sync, no change
+    if cached_server_id != current_server_id:
+        return True
+    # An unknown library on either side is not a change (caches synced before library_id was stored)
+    cached_library_id = state.get("library_id")
+    return bool(cached_library_id and current_library_id and cached_library_id != current_library_id)
 
-    return cached_server_id != current_server_id
+
+def library_id_of(media_client: Any) -> str | None:
+    """The ID of the music library a client is set to, or None if it has none."""
+    get_id = getattr(media_client, "get_library_identifier", None)
+    return get_id() if get_id else None
 
 
 _INSERT_TRACK_SQL = (
@@ -499,6 +514,18 @@ def _merge_genres(*genre_lists: list[str]) -> list[str]:
         for genre in genres:
             merged.setdefault(genre.lower(), genre)
     return list(merged.values())
+
+
+def _track_genre_tags(raw: dict[str, Any]) -> list[str]:
+    """A track's own genre tags, from the listing row's XML.
+
+    plexapi's track.genres is a lazy property: it is not in vars(track), and reading it on a row without
+    tags costs a request.
+    """
+    data = raw.get("_data")
+    if data is not None:
+        return [el.attrib["tag"] for el in data if el.tag == "Genre" and el.attrib.get("tag")]
+    return [g.tag for g in raw.get("genres") or []]
 
 
 def _plex_track_row(
@@ -520,7 +547,7 @@ def _plex_track_row(
     genres = _merge_genres(
         album_data.get("genres", []),
         artist_genres.get(str(raw.get("grandparentRatingKey") or ""), []),
-        [g.tag for g in raw.get("genres") or []],
+        _track_genre_tags(raw),
     )
     last_viewed_at = raw.get("lastViewedAt")
     return (
@@ -616,6 +643,7 @@ def sync_library(
     media_client: Any,
     on_progress: Callable[[int, int], None] | None = None,
     incremental: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Sync tracks from Plex or Jellyfin to local cache.
 
@@ -629,13 +657,15 @@ def sync_library(
     - incremental=True (Plex only) upserts tracks added or changed since the last sync's watermark instead of
       rebuilding the cache; deletions are picked up by the next full sync. Jellyfin keeps the upstream path.
     - A full sync persists sync_started_at before it starts and clears it when it commits or fails; a process
-      killed mid-sync leaves it set and needs_resync() restarts the sync on boot.
-    - A full sync that would leave the cache empty or far smaller than Plex's library fails and keeps the old cache.
+      killed mid-sync leaves it set and sync_needed() restarts the sync on boot.
+    - A full sync that reads far fewer tracks than Plex reports fails and keeps the old cache. So does one that
+      would shrink the cache to under half, unless force=True.
 
     Args:
         media_client: Connected PlexClient or JellyfinClient
         on_progress: Optional callback(current, total) for progress updates
         incremental: only tracks changed since the last sync (needs a previous full sync)
+        force: accept a library less than half the size of the cache
 
     Returns:
         Dict with success, track_count, duration_ms, error
@@ -673,9 +703,10 @@ def sync_library(
         if not server_id:
             raise ValueError("Could not get media server identifier")
 
-        # Check if server changed - clear cache if so
-        if check_server_changed(server_id):
-            logger.info("Media server changed, clearing cache")
+        # Check if the server or music library changed - clear cache if so
+        library_id = library_id_of(media_client)
+        if check_server_changed(server_id, library_id):
+            logger.info("Media server or music library changed, clearing cache")
             clear_cache()
 
         conn = ensure_db_initialized()
@@ -763,13 +794,16 @@ def sync_library(
                 with _sync_lock:
                     _sync_state["current"] = synced_count
 
-        # An empty or shrunken result is a failure, so the rollback keeps the cache (a timed-out listing
-        # otherwise looks like an empty library and replaces the cache with 0 tracks).
+        # A short read or a cache shrinking to under half is a failure, so the rollback keeps the cache
+        # (force accepts the smaller library). A library that really is empty syncs to 0 tracks.
         if not incremental:
-            if total == 0 or (previous and total < previous * 0.5):
-                raise RuntimeError(f"media server returned {total} tracks (cache has {previous}) - keeping the cache")
             if is_plex and expected and total < expected * 0.5:
                 raise RuntimeError(f"read {total} of {expected} tracks Plex reports - keeping the cache")
+            if not force and previous and total < previous * 0.5:
+                raise RuntimeError(
+                    f"media server returned {total} tracks (cache has {previous}) - keeping the cache. "
+                    "Refresh the library to accept it"
+                )
 
         duration_ms = int((time.time() - start_time) * 1000)
         synced_at = _now_iso()
@@ -782,9 +816,10 @@ def sync_library(
         else:
             track_count = synced_count
             conn.execute(
-                "UPDATE sync_state SET plex_server_id = ?, last_sync_at = ?, track_count = ?, sync_duration_ms = ?, "
-                "cache_version = ?, sync_started_at = NULL, incremental_at = ? WHERE id = 1",
-                (server_id, synced_at, synced_count, duration_ms, CACHE_VERSION, started_at.isoformat()),
+                "UPDATE sync_state SET plex_server_id = ?, library_id = ?, last_sync_at = ?, track_count = ?, "
+                "sync_duration_ms = ?, cache_version = ?, sync_started_at = NULL, incremental_at = ? WHERE id = 1",
+                (server_id, library_id, synced_at, synced_count, duration_ms, CACHE_VERSION,
+                 started_at.isoformat()),
             )
         conn.commit()
 
@@ -968,6 +1003,8 @@ def replace_library(get_media_client: Callable[[], Any], switch: int) -> None:
 def needs_resync() -> bool:
     """Check if the cache must be re-synced: a schema migration, or an older CACHE_VERSION.
 
+    The frontend shows its blocking upgrade dialog on this. An empty or interrupted cache is sync_needed().
+
     Safe for fresh DBs: _migration_applied is False when CREATE TABLE already includes
     all columns, and an empty cache has nothing to rebuild.
     """
@@ -975,20 +1012,27 @@ def needs_resync() -> bool:
         return True
     conn = ensure_db_initialized()
     try:
-        row = conn.execute(
-            "SELECT track_count, cache_version, sync_started_at FROM sync_state WHERE id = 1"
-        ).fetchone()
+        row = conn.execute("SELECT track_count, cache_version FROM sync_state WHERE id = 1").fetchone()
     finally:
         conn.close()
-    if not row:
-        return False
-    # An empty cache or a full sync the previous process did not finish (sync_started_at still set, e.g. the
-    # container was restarted mid-sync) both need a sync - previously only schema migrations triggered one.
-    with _sync_lock:
-        syncing = _sync_state["is_syncing"]
-    if not syncing and (not row["track_count"] or row["sync_started_at"]):
-        return True
-    return bool(row["track_count"] and (row["cache_version"] or 1) < CACHE_VERSION)
+    return bool(row and row["track_count"] and (row["cache_version"] or 1) < CACHE_VERSION)
+
+
+def sync_needed() -> str | None:
+    """Why the cache needs a full sync whatever its age: "interrupted", "empty", or None.
+
+    Interrupted means the previous process died mid-sync (e.g. a container restart).
+    """
+    conn = ensure_db_initialized()
+    try:
+        row = conn.execute("SELECT track_count, sync_started_at FROM sync_state WHERE id = 1").fetchone()
+    finally:
+        conn.close()
+    if not row or get_sync_progress()["is_syncing"]:
+        return None
+    if row["sync_started_at"]:
+        return "interrupted"
+    return None if row["track_count"] else "empty"
 
 
 def get_album_candidates(

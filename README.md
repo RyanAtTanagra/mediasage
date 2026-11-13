@@ -119,10 +119,11 @@ MediaSage syncs your music library to a local SQLite database. After a one-time 
 - **Setup wizard** walks you through first-run configuration and sync
 - **Footer status** shows track count and last sync time
 - **Auto-refresh** re-syncs once the cache is older than the interval in Settings (daily by default; every 6 or 12 hours, weekly, or off)
-- **Incremental refresh** (Plex) picks up added or changed tracks every hour in between, without a full sync
-- **Large libraries** sync in pages (about 10 minutes for ~390,000 tracks); a failed or empty sync never replaces a good cache, and an interrupted one restarts by itself
+- **Incremental refresh** (Plex) picks up newly added tracks and tag edits every hour in between, without a full sync. Plays, ratings and deleted tracks are picked up by the next full sync
+- **Large libraries** sync in pages (about 10 minutes for ~390,000 tracks); a failed sync never replaces a good cache, and an interrupted one restarts by itself
+- **Shrink protection**: an automatic sync that would cut the cache to less than half is treated as a server problem and skipped. If the library really did shrink, refreshing it by hand accepts the smaller library
 - **Manual refresh** available anytime, e.g. right after adding music
-- **Switching servers** between Plex and Jellyfin re-syncs automatically
+- **Switching servers** between Plex and Jellyfin, or picking a different music library, re-syncs automatically
 
 ### Multi-Provider Support
 
@@ -336,8 +337,8 @@ Environment variables are optional, for scripted or automated installs. A variab
 | `LLM_MODEL_ANALYSIS` / `LLM_MODEL_GENERATION` | Force the analysis or generation model |
 | `LLM_TIMEOUT` | Seconds to wait for an AI response (default: 600). Also in Settings as Request Timeout |
 | `LIBRARY_SYNC_HOURS` | Re-sync the library cache once it's this many hours old (default: 24; `0` turns automatic re-syncs off). Also in Settings as Auto-Refresh Library |
-| `LIBRARY_INCREMENTAL_MINUTES` | Plex: read only added/changed tracks once the cache is this many minutes old (default: 60; `0` turns it off). Deleted tracks are removed by the next full sync |
-| `LIBRARY_CHECK_SECONDS` | How often the cache is checked for an empty, interrupted, stale or incremental sync (default: 300) |
+| `LIBRARY_INCREMENTAL_MINUTES` | Plex: read only added/changed tracks once the cache is this many minutes old (default: 60; `0` turns it off). Plays, ratings and deleted tracks are picked up by the next full sync |
+| `LIBRARY_CHECK_SECONDS` | How often the cache is checked for an empty, interrupted, stale or incremental sync (default: 300; `0` turns the periodic check off, leaving one check at startup) |
 | `LIBRARY_RETRY_MINUTES` | Wait this long after a failed sync before trying again (default: 30) |
 | `PLEX_TIMEOUT` | Seconds to wait for a Plex request (default: 300) |
 | `PLEX_SYNC_PAGE_SIZE` | Tracks per Plex request during a sync (default: 5000) |
@@ -520,7 +521,7 @@ Interactive documentation available at `/docs` when running.
 | `/api/setup/complete` | POST | Mark setup wizard as complete |
 | `/api/library/stats` | GET | Library statistics |
 | `/api/library/status` | GET | Cache state, track count, sync progress, last attempt/error, incremental watermark, interrupted flag |
-| `/api/library/sync` | POST | Trigger background library sync (`?incremental=true`: only added/changed tracks, Plex) |
+| `/api/library/sync` | POST | Trigger background library sync (`?incremental=true`: only added/changed tracks, Plex; `?force=true`: accept a library less than half the size of the cache) |
 | `/api/library/search` | GET | Search library tracks |
 | `/api/library/artists` | GET | Search library artists (for the artist filter) |
 | `/api/analyze/prompt` | POST | Analyze natural language prompt |

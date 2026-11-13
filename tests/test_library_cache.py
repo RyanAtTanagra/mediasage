@@ -35,7 +35,7 @@ def initialized_db(temp_db):
 class PagedPlexMock:
     """Gives a simple mock Plex client the paged sync interface (iter_raw_tracks + fetch_metadata).
 
-    Subclasses provide get_all_raw_tracks() / get_all_albums_metadata() / get_all_artist_genres().
+    Subclasses provide all_tracks() and albums() (rating key -> year and genres).
     """
 
     SYNC_PAGE_SIZE = 2
@@ -44,12 +44,12 @@ class PagedPlexMock:
         return 0
 
     def iter_raw_tracks(self, updated_since=None):
-        tracks = self.get_all_raw_tracks()
+        tracks = self.all_tracks()
         for start in range(0, len(tracks), self.SYNC_PAGE_SIZE):
             yield tracks[start:start + self.SYNC_PAGE_SIZE]
 
     def fetch_metadata(self, rating_keys):
-        albums = self.get_all_albums_metadata()
+        albums = self.albums()
         return {key: albums[key] for key in rating_keys if key in albums}
 
 
@@ -464,13 +464,11 @@ class TestSyncLibrary:
             def get_machine_identifier(self):
                 return "test-server-123"
 
-            def get_all_albums_metadata(self):
+            def albums(self):
                 return self.album_metadata
 
-            def get_all_artist_genres(self):
-                return {}
 
-            def get_all_raw_tracks(self):
+            def all_tracks(self):
                 return self.tracks
 
         return MockPlexClient()
@@ -613,13 +611,11 @@ class TestSyncLibrary:
             def get_machine_identifier(self):
                 return "test-server-123"
 
-            def get_all_albums_metadata(self):
+            def albums(self):
                 return {"100": {"genres": ["Electronic"], "year": 2024}}
 
-            def get_all_artist_genres(self):
-                return {}
 
-            def get_all_raw_tracks(self):
+            def all_tracks(self):
                 return [mock_track("new-1", "New Song", "New Artist", "New Album", 200000, "100")]
 
         # Run sync
@@ -641,13 +637,11 @@ class TestSyncLibrary:
             def get_machine_identifier(self):
                 return "test-server-123"
 
-            def get_all_albums_metadata(self):
+            def albums(self):
                 return {"100": {"genres": ["Rock"], "year": 2020}}
 
-            def get_all_artist_genres(self):
-                return {}
 
-            def get_all_raw_tracks(self):
+            def all_tracks(self):
                 return [mock_track("1", "Song", "Artist", "Album", 180000, "100")]
 
         result = library_cache.sync_library(SuccessfulClient())
@@ -662,11 +656,9 @@ class TestSyncLibrary:
             def get_machine_identifier(self):
                 return "test-server-123"
 
-            def get_all_albums_metadata(self):
+            def iter_raw_tracks(self, updated_since=None):
                 raise ConnectionError("Plex unreachable")
 
-            def get_all_artist_genres(self):
-                return {}
 
         result = library_cache.sync_library(FailingClient())
         assert result["success"] is False
@@ -688,11 +680,9 @@ class TestSyncLibrary:
             def get_machine_identifier(self):
                 return "test-server-123"
 
-            def get_all_albums_metadata(self):
+            def albums(self):
                 return {}
 
-            def get_all_artist_genres(self):
-                return {}
 
             def iter_raw_tracks(self, updated_since=None):
                 # Two pages are written before the media server fails
@@ -919,6 +909,13 @@ class TestCacheVersion:
         conn.commit()
         conn.close()
 
+    def test_brand_new_database_does_not(self, temp_db, monkeypatch):
+        """A first install must get the first-time sync dialog, not the upgrade one."""
+        monkeypatch.setattr(library_cache, "_schema_initialized", False)
+        library_cache.ensure_db_initialized().close()
+        assert not library_cache.needs_resync()
+        assert library_cache.sync_needed() == "empty"
+
     def test_older_cache_needs_resync(self, initialized_db, monkeypatch):
         monkeypatch.setattr(library_cache, "_migration_applied", False)
         self._set(initialized_db, 100, 1)
@@ -929,11 +926,15 @@ class TestCacheVersion:
         self._set(initialized_db, 100, library_cache.CACHE_VERSION)
         assert not library_cache.needs_resync()
 
-    def test_empty_cache_needs_resync(self, initialized_db, monkeypatch):
-        """An empty cache needs a sync even when its version is current (a failed sync once committed 0 tracks)."""
+    def test_empty_cache_needs_a_sync_but_no_upgrade_dialog(self, initialized_db, monkeypatch):
+        """An empty cache needs a sync (a failed sync once committed 0 tracks), but needs_resync() is what the
+        frontend shows its blocking upgrade dialog on, so that stays False."""
         monkeypatch.setattr(library_cache, "_migration_applied", False)
         self._set(initialized_db, 0, library_cache.CACHE_VERSION)
-        assert library_cache.needs_resync()
+        assert library_cache.sync_needed() == "empty"
+        assert not library_cache.needs_resync()
+        self._set(initialized_db, 100, library_cache.CACHE_VERSION)
+        assert library_cache.sync_needed() is None
 
 
 class TestHalfStarRatings:
@@ -976,10 +977,10 @@ class TestSyncSafety:
             def get_machine_identifier(self):
                 return "test-server-123"
 
-            def get_all_albums_metadata(self):
+            def albums(self):
                 return {"100": {"genres": ["Rock"], "year": 2020}}
 
-            def get_all_raw_tracks(self):
+            def all_tracks(self):
                 return tracks
         return Client()
 
@@ -989,6 +990,63 @@ class TestSyncSafety:
         result = library_cache.sync_library(self._client([]))
         assert result["success"] is False
         assert library_cache.get_sync_state()["track_count"] == 2
+
+    def test_short_read_keeps_cache_even_when_forced(self, initialized_db):
+        """Plex reports 10 tracks but the listing gave 3: a failed read, not a smaller library."""
+        tracks = [self._track(str(i), title=f"Song {i}") for i in range(10)]
+        assert library_cache.sync_library(self._client(tracks))["success"]
+        library_cache._sync_state["is_syncing"] = False
+        client = self._client(tracks[:3])
+        client.get_library_total_tracks = lambda: 10
+        assert library_cache.sync_library(client, force=True)["success"] is False
+        assert library_cache.get_sync_state()["track_count"] == 10
+
+    def test_forced_sync_accepts_a_much_smaller_library(self, initialized_db):
+        tracks = [self._track(str(i), title=f"Song {i}") for i in range(10)]
+        assert library_cache.sync_library(self._client(tracks))["success"]
+        library_cache._sync_state["is_syncing"] = False
+        assert library_cache.sync_library(self._client(tracks[:3]))["success"] is False
+        library_cache._sync_state["is_syncing"] = False
+        assert library_cache.sync_library(self._client(tracks[:3]), force=True)["success"]
+        assert library_cache.get_sync_state()["track_count"] == 3
+
+    def test_empty_library_syncs_to_zero_tracks(self, initialized_db, monkeypatch):
+        monkeypatch.setattr(library_cache, "_migration_applied", False)
+        result = library_cache.sync_library(self._client([]))
+        assert result == {"success": True, "track_count": 0, "duration_ms": result["duration_ms"]}
+        assert library_cache.get_sync_state()["error"] is None
+        assert not library_cache.needs_resync()
+
+    def test_other_music_library_on_same_server_replaces_cache(self, initialized_db):
+        """Same server, different music library: the cache is cleared, so the smaller library is accepted."""
+        tracks = [self._track(str(i), title=f"Song {i}") for i in range(10)]
+        first, second = self._client(tracks), self._client([self._track("50"), self._track("51")])
+        first.get_library_identifier = lambda: "library-a"
+        second.get_library_identifier = lambda: "library-b"
+        assert library_cache.sync_library(first)["success"]
+        library_cache._sync_state["is_syncing"] = False
+        assert not library_cache.check_server_changed("test-server-123", "library-a")
+        assert library_cache.check_server_changed("test-server-123", "library-b")
+        assert library_cache.sync_library(second)["success"]
+        state = library_cache.get_sync_state()
+        assert (state["track_count"], state["library_id"]) == (2, "library-b")
+
+    def test_cache_without_library_id_is_not_a_change(self, initialized_db):
+        """Caches synced before library_id existed must not be wiped on upgrade."""
+        assert library_cache.sync_library(self._client([self._track("1")]))["success"]   # client has no library id
+        assert library_cache.get_sync_state()["library_id"] is None
+        assert not library_cache.check_server_changed("test-server-123", "library-a")
+
+    def test_track_genres_come_from_the_listing_row(self, initialized_db):
+        """plexapi keeps genres out of vars(track); the Genre elements of the row are read instead."""
+        import xml.etree.ElementTree as ET
+        track = self._track("1")
+        track._data = ET.fromstring('<Track ratingKey="1"><Genre tag="R&amp;B"/><Genre tag="Rock"/><Media/></Track>')
+        assert library_cache.sync_library(self._client([track]))["success"]
+        conn = sqlite3.connect(str(initialized_db))
+        genres = conn.execute("SELECT genres FROM tracks WHERE rating_key = '1'").fetchone()[0]
+        conn.close()
+        assert json.loads(genres) == ["Rock", "R&B"]   # album genre first, then the track's own
 
     def test_shrunken_result_keeps_cache(self, initialized_db):
         tracks = [self._track(str(i), title=f"Song {i}") for i in range(10)]
@@ -1001,12 +1059,13 @@ class TestSyncSafety:
         monkeypatch.setattr(library_cache, "_migration_applied", False)
         assert library_cache.sync_library(self._client([self._track("1")]))["success"]
         library_cache._sync_state["is_syncing"] = False
-        assert not library_cache.needs_resync()
+        assert library_cache.sync_needed() is None
         conn = sqlite3.connect(str(initialized_db))
         conn.execute("UPDATE sync_state SET sync_started_at = '2026-01-01T00:00:00+00:00' WHERE id = 1")
         conn.commit()
         conn.close()
-        assert library_cache.needs_resync()
+        assert library_cache.sync_needed() == "interrupted"
+        assert not library_cache.needs_resync()
 
     def test_incremental_sync_upserts_without_dropping(self, initialized_db):
         assert library_cache.sync_library(self._client([self._track("1"), self._track("2", title="Two")]))["success"]
